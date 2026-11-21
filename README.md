@@ -31,6 +31,9 @@ Rust driver and a small viewer for the cheap USB "RF-Power-Meter-V5.0" (100 kHz 
     step through the captures, Back to live runs live until the next one, Captures goes back
     to them). Blocks of only ±99.9 dBm, the meter's "no valid reading", don't trigger.
 
+  A reference level (Ref, next to Average) draws a solid line in both plots to compare with,
+  such as a limit; unlike the trigger it captures nothing.
+
   On both plots, scroll zooms the time axis, Ctrl+scroll the dB axis, and a double click
   switches the dB axis between fitting the data and the meter's full range.
 

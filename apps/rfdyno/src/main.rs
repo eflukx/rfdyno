@@ -182,6 +182,9 @@ struct App {
     block_y: YScale,
     /// The last export or open: when, what to show, and the file's full path.
     note: Option<(Instant, String, String)>,
+    /// The reference line, on or off, and its level.
+    reference: bool,
+    reference_dbm: f64,
     /// Asking whether to clear the history.
     confirm_clear: bool,
     /// The export file being viewed, if one is (viewing mode: no meter, no sampling).
@@ -259,6 +262,8 @@ impl App {
             note: None,
             file: None,
             confirm_clear: false,
+            reference: parsed(cc, "reference").unwrap_or(false),
+            reference_dbm: parsed(cc, "reference_dbm").unwrap_or(-30.0),
             ports: Vec::new(),
             port_choice: stored("port").unwrap_or_else(|| AUTO.to_owned()),
             link: None,
@@ -786,6 +791,20 @@ impl App {
                 )
                 .on_hover_text("Blocks the big number averages over");
                 ui.label("Average");
+                ui.separator();
+                ui.add_enabled(
+                    self.reference,
+                    egui::DragValue::new(&mut self.reference_dbm)
+                        .range(-70.0..=30.0)
+                        .speed(0.1)
+                        .fixed_decimals(1)
+                        .suffix(" dBm"),
+                )
+                .on_hover_text("The reference level");
+                theme::toggle(ui, &mut self.reference, "Ref").on_hover_text(
+                    "A reference level, a solid line in both plots: something to compare with, \
+                     such as a limit. It doesn't capture anything (that's the trigger).",
+                );
             });
         });
 
@@ -1053,13 +1072,14 @@ impl App {
         };
         let period_ms = span * 1000.0 / rfpm::READINGS_PER_FRAME as f64;
         let levels = self.shown_levels();
+        let range = self.db_range(full);
         plots::block(
             ui,
             height,
             traces,
             period_ms,
             &mut self.block_y,
-            full,
+            range,
             levels,
         );
     }
@@ -1432,6 +1452,14 @@ impl App {
         }
     }
 
+    /// Both plots' dB frame: `full` and the reference level, when it's on.
+    fn db_range(&self, full: (f64, f64)) -> plots::DbRange {
+        plots::DbRange {
+            full,
+            reference: self.reference.then_some(self.reference_dbm),
+        }
+    }
+
     /// Seconds since start as local clock time.
     fn wall(&self, at: f64) -> String {
         plots::wall_clock(self.started_wall, at, 0)
@@ -1483,13 +1511,14 @@ impl eframe::App for App {
             let stats = self.history.stats(from, to);
             self.history_bar(ui, now, stats);
             let history_height = ui.available_height().max(100.0);
+            let range = self.db_range(full);
             plots::history(
                 ui,
                 history_height,
                 &self.history,
                 &mut self.view,
                 now,
-                full,
+                range,
                 self.trigger.then_some(plots::Trigger {
                     threshold: self.trigger_dbm,
                     captures: &self.captures,
@@ -1513,6 +1542,8 @@ impl eframe::App for App {
         storage.set_string("auto_reconnect", self.auto_reconnect.to_string());
         storage.set_string("history_window", self.view.window.to_string());
         storage.set_string("trigger", self.trigger.to_string());
+        storage.set_string("reference", self.reference.to_string());
+        storage.set_string("reference_dbm", self.reference_dbm.to_string());
         storage.set_string("trigger_dbm", self.trigger_dbm.to_string());
         storage.set_string("always_on_top", self.always_on_top.to_string());
     }

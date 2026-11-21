@@ -123,18 +123,18 @@ fn extent<'a>(values: impl IntoIterator<Item = &'a f64>) -> Option<(f64, f64)> {
 }
 
 /// Plots `traces` over the block, x in ms from the block's first sample (`period_ms` apart),
-/// the dB axis as `y` says (`full`: the meter's range).
+/// the dB axis as `y` says within `range`.
 pub fn block(
     ui: &mut egui::Ui,
     height: f32,
     traces: Vec<Trace>,
     period_ms: f64,
     y: &mut YScale,
-    full: (f64, f64),
+    range: DbRange,
     levels: Option<Levels>,
 ) {
     let span_ms = period_ms * (rfpm::READINGS_PER_FRAME as f64 - 1.0);
-    let data = extent(traces.iter().flat_map(|trace| &trace.values));
+    let data = range.with_reference(extent(traces.iter().flat_map(|trace| &trace.values)));
     let response = Plot::new("block")
         .height(height)
         .show_background(false)
@@ -153,7 +153,8 @@ pub fn block(
             if let Some(factor) = wheel_zoom(plot) {
                 plot.zoom_bounds_around_hovered(Vec2::new(factor, 1.0));
             }
-            drive_y(plot, y, data, full);
+            drive_y(plot, y, data, range.full);
+            range.draw_reference(plot);
             if let Some(levels) = levels {
                 let palette = theme::c();
                 for (name, dbm, style) in [
@@ -233,6 +234,38 @@ fn sample_at(x: f64, period_ms: f64) -> Option<usize> {
     (0.0..rfpm::READINGS_PER_FRAME as f64)
         .contains(&index)
         .then_some(index as usize)
+}
+
+/// The dB axis's frame for both plots: the meter's full range and the reference level.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DbRange {
+    /// The meter's full range (a double click shows it).
+    pub full: (f64, f64),
+    /// The reference level, a solid line in both plots, if it's on.
+    pub reference: Option<f64>,
+}
+
+impl DbRange {
+    /// `data` (lowest, highest) stretched to include the reference, so fitting keeps it in view.
+    fn with_reference(self, data: Option<(f64, f64)>) -> Option<(f64, f64)> {
+        match (data, self.reference) {
+            (Some((low, high)), Some(reference)) => Some((low.min(reference), high.max(reference))),
+            (None, Some(reference)) => Some((reference, reference)),
+            (data, None) => data,
+        }
+    }
+
+    /// Draws the reference line, if it's on.
+    fn draw_reference(self, plot: &mut PlotUi) {
+        if let Some(reference) = self.reference {
+            plot.hline(
+                HLine::new("reference", reference)
+                    .color(theme::c().echo)
+                    .width(1.5)
+                    .allow_hover(false),
+            );
+        }
+    }
 }
 
 /// What the history plot shows of the trigger: its threshold and the blocks it caught.
@@ -316,7 +349,7 @@ pub fn history(
     history: &History,
     view: &mut HistoryView,
     now: f64,
-    full: (f64, f64),
+    range: DbRange,
     trigger: Option<Trigger<'_>>,
 ) {
     let palette = theme::c();
@@ -360,7 +393,8 @@ pub fn history(
             let (from, to) = view.range(now);
             plot.set_plot_bounds_x(from..=to);
             let data = history.stats(from, to).map(|stats| (stats.min, stats.max));
-            drive_y(plot, &mut view.y, data, full);
+            drive_y(plot, &mut view.y, range.with_reference(data), range.full);
+            range.draw_reference(plot);
 
             // Zoomed in, every sample at its own time; zoomed out, each block's mean on the band
             // between its lowest and highest reading. A block beyond each edge comes along, so
@@ -637,6 +671,30 @@ mod tests {
         assert!((levels.rms - -12.596).abs() < 1e-3);
         assert_eq!(levels.avg, -15.0);
         assert_eq!(Levels::of(&[]), None);
+    }
+
+    #[test]
+    fn reference_stays_in_view() {
+        let range = |reference| DbRange {
+            full: (-65.0, 5.0),
+            reference,
+        };
+        assert_eq!(
+            range(None).with_reference(Some((-60.0, -50.0))),
+            Some((-60.0, -50.0))
+        );
+        assert_eq!(
+            range(Some(-20.0)).with_reference(Some((-60.0, -50.0))),
+            Some((-60.0, -20.0))
+        );
+        assert_eq!(
+            range(Some(-55.0)).with_reference(Some((-60.0, -50.0))),
+            Some((-60.0, -50.0))
+        );
+        assert_eq!(
+            range(Some(-20.0)).with_reference(None),
+            Some((-20.0, -20.0))
+        );
     }
 
     #[test]
