@@ -900,14 +900,27 @@ impl App {
                 }
             }
             if let Some(levels) = self.shown_levels() {
+                let burst = levels.burst.map_or_else(String::new, |burst| {
+                    format!(
+                        " · burst {:.1} dBm, {:.0} % on",
+                        burst.rms_dbm,
+                        burst.duty * 100.0
+                    )
+                });
                 ui.label(
-                    RichText::new(format!("rms {:.1} · avg {:.1} dBm", levels.rms, levels.avg))
-                        .color(palette.muted),
+                    RichText::new(format!(
+                        "rms {:.1} · avg {:.1} dBm{burst}",
+                        levels.rms, levels.avg
+                    ))
+                    .color(palette.muted),
                 )
-                .on_hover_text(
+                .on_hover_text(format!(
                     "The block's RMS (its power average) and the plain average of its dBm \
-                     readings; dashed and dotted in the plot",
-                );
+                     readings, dashed and dotted in the plot. Burst: the RMS of only the readings \
+                     within {:.0} dB of the peak, the power while transmitting with the idle time \
+                     left out, and how much of the block that is.",
+                    rfpm::BURST_GATE_DB
+                ));
             }
             if picked.is_none() {
                 ui.add_space(8.0);
@@ -1365,6 +1378,10 @@ impl App {
         let of_entry = |entry: &history::Entry| plots::Levels {
             rms: f64::from(entry.mean),
             avg: f64::from(entry.log_mean),
+            burst: entry.burst.is_finite().then(|| rfpm::Burst {
+                rms_dbm: f64::from(entry.burst),
+                duty: f64::from(entry.duty),
+            }),
         };
         if let Some(at) = self.view.picked {
             return self

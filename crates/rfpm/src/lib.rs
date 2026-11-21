@@ -51,7 +51,7 @@ mod parse;
 mod port;
 
 pub use command::{BLOCK_TRANSFER, COMMAND_SPACING, Command, CommandError, SampleRate};
-pub use frame::{Frame, FrameCollector, PeakHold, dbm_to_mw, mean_waveform};
+pub use frame::{BURST_GATE_DB, Burst, Frame, FrameCollector, PeakHold, dbm_to_mw, mean_waveform};
 pub use parse::{CORRUPT_DBM, Event, Parser, READINGS_PER_FRAME, Settings};
 pub use port::{Commander, Meter, MeterPort, PID, SendError, VID, find_ports};
 

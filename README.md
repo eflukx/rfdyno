@@ -16,8 +16,9 @@ Rust driver and a small viewer for the cheap USB "RF-Power-Meter-V5.0" (100 kHz 
     band on a clock-time axis, each block at the time it was sampled (not when it arrived over
     USB). Zoomed in until the samples fit, it shows every sample instead, gaps between blocks
     included. It follows the newest block live; drag to look back, and click a block to show
-    it in the block plot. Hovering a block shows its peak, RMS (the power average), the plain
-    average of its dBm readings, and its minimum. Export saves the blocks
+    it in the block plot. Hovering a block shows its peak, its burst RMS and duty (only the
+    readings within 10 dB of the peak: the power while transmitting, idle time left out), its RMS
+    (the power average), the plain average of its dBm readings, and its minimum. Export saves the blocks
     in view, the trigger's captures or the whole history as CSV in an `exports` folder next to the program:
     one row per block with when its sampling started, the meter's frequency, attenuation and
     sample rate, its figures, then its 500 readings. Open (or dropping a file on the window)

@@ -191,9 +191,9 @@ pub fn block(
         && let Some(pointer) = response.inner
         && let Some(index) = sample_at(pointer.x, period_ms)
     {
-        let rows: Vec<(&str, Color32, f64)> = traces
+        let rows: Vec<(&str, Color32, String)> = traces
             .iter()
-            .filter_map(|trace| Some((trace.name, trace.color, *trace.values.get(index)?)))
+            .filter_map(|trace| Some((trace.name, trace.color, dbm(*trace.values.get(index)?))))
             .collect();
         if !rows.is_empty() {
             let time = format_ms(index as f64 * period_ms);
@@ -209,6 +209,8 @@ pub fn block(
 pub struct Levels {
     pub rms: f64,
     pub avg: f64,
+    /// The burst: only the readings near the peak ([`rfpm::Frame::burst`]).
+    pub burst: Option<rfpm::Burst>,
 }
 
 impl Levels {
@@ -217,13 +219,13 @@ impl Levels {
         if readings.is_empty() {
             return None;
         }
-        let rms = rfpm::Frame {
+        let frame = rfpm::Frame {
             readings: readings.to_vec(),
-        }
-        .mean_dbm();
+        };
         Some(Self {
-            rms,
+            rms: frame.mean_dbm(),
             avg: readings.iter().sum::<f64>() / readings.len() as f64,
+            burst: frame.burst(),
         })
     }
 }
@@ -487,14 +489,16 @@ pub fn history(
             None => wall_clock(start, entry.at, 1),
         };
         let mut rows = Vec::new();
-        if let Some(dbm) = sample {
-            rows.push(("sample", palette.accent, f64::from(dbm)));
+        if let Some(value) = sample {
+            rows.push(("sample", palette.accent, dbm(f64::from(value))));
         }
         rows.extend([
-            ("peak", muted, f64::from(entry.max)),
-            ("rms", muted, f64::from(entry.mean)),
-            ("avg", muted, f64::from(entry.log_mean)),
-            ("min", muted, f64::from(entry.min)),
+            ("peak", muted, dbm(f64::from(entry.max))),
+            ("burst", palette.text, dbm(f64::from(entry.burst))),
+            ("duty", muted, format!("{:.0} %", entry.duty * 100.0)),
+            ("rms", muted, dbm(f64::from(entry.mean))),
+            ("avg", muted, dbm(f64::from(entry.log_mean))),
+            ("min", muted, dbm(f64::from(entry.min))),
         ]);
         response
             .response
@@ -505,9 +509,14 @@ pub fn history(
 /// The width of the values in a tooltip, enough for `-100.0 dBm`.
 const TOOLTIP_VALUE_WIDTH: f32 = 76.0;
 
-/// A tooltip of values in dBm: a header, then a row per value with its name (in its colour)
-/// left and the value right-aligned.
-fn value_tooltip(ui: &mut egui::Ui, header: &str, rows: &[(&str, Color32, f64)]) {
+/// A value in dBm for a tooltip: `-29.6 dBm`.
+fn dbm(value: f64) -> String {
+    format!("{value:.1} dBm")
+}
+
+/// A tooltip of values: a header, then a row per value with its name (in its colour) left and
+/// the value right-aligned.
+fn value_tooltip(ui: &mut egui::Ui, header: &str, rows: &[(&str, Color32, String)]) {
     // Rows as high as the text: the 30 px control height is for buttons.
     let row_height = ui.text_style_height(&egui::TextStyle::Body);
     ui.spacing_mut().interact_size.y = row_height;
@@ -516,15 +525,15 @@ fn value_tooltip(ui: &mut egui::Ui, header: &str, rows: &[(&str, Color32, f64)])
         .num_columns(2)
         .spacing([12.0, 0.0])
         .show(ui, |ui| {
-            for &(name, color, dbm) in rows {
-                ui.label(egui::RichText::new(name).color(color));
+            for (name, color, value) in rows {
+                ui.label(egui::RichText::new(*name).color(*color));
                 // A fixed width to align in: a right-to-left layout alone takes all there is.
                 let size = egui::vec2(TOOLTIP_VALUE_WIDTH, row_height);
                 ui.allocate_ui_with_layout(
                     size,
                     egui::Layout::right_to_left(egui::Align::Center),
                     |ui| {
-                        ui.label(format!("{dbm:.1} dBm"));
+                        ui.label(value);
                     },
                 );
                 ui.end_row();

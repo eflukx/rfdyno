@@ -31,6 +31,10 @@ pub struct Entry {
     pub max: f32,
     /// The plain mean of the readings in dBm (a log average): below `mean` for bursts.
     pub log_mean: f32,
+    /// The burst's RMS (only the readings near the peak, see [`rfpm::Frame::burst`]) in dBm,
+    /// and its duty (the share of readings in it, 0 to 1).
+    pub burst: f32,
+    pub duty: f32,
     /// The readings in dBm.
     pub samples: Box<[f32]>,
     /// The meter's settings it was measured with.
@@ -123,7 +127,10 @@ impl History {
     /// Adds a block sampled around `at` (its middle, seconds since start) over `span`.
     pub fn push(&mut self, at: f64, span: Duration, frame: &Frame) {
         let samples: Box<[f32]> = frame.readings.iter().map(|&dbm| dbm as f32).collect();
+        let burst = frame.burst();
         self.entries.push_back(Entry {
+            burst: burst.map_or(f32::NEG_INFINITY, |burst| burst.rms_dbm as f32),
+            duty: burst.map_or(0.0, |burst| burst.duty as f32),
             at,
             span: span.as_secs_f64(),
             mean: frame.mean_dbm() as f32,
@@ -341,7 +348,12 @@ fn csv_row(line: &str, start: DateTime<Local>, with_settings: bool) -> Result<En
         .map(|field| number("reading", field).map(|dbm| dbm as f32))
         .collect::<Result<Box<[f32]>, _>>()?;
     let since_start = (sampled - start).num_microseconds().unwrap_or(0) as f64 / 1e6;
+    // Not in the file: worked out from the readings, as when measured.
+    let readings = samples.iter().map(|&dbm| f64::from(dbm)).collect();
+    let burst = Frame { readings }.burst();
     Ok(Entry {
+        burst: burst.map_or(f32::NEG_INFINITY, |burst| burst.rms_dbm as f32),
+        duty: burst.map_or(0.0, |burst| burst.duty as f32),
         at: since_start + span / 2.0,
         span,
         mean,
@@ -527,6 +539,8 @@ mod tests {
             assert_eq!((back.min, back.max), (original.min, original.max));
             assert_eq!(back.samples.len(), original.samples.len());
             assert_eq!(back.meta, original.meta);
+            assert!((back.burst - original.burst).abs() < 0.01);
+            assert_eq!(back.duty, original.duty);
         }
         assert_eq!(read[0].samples[2], -30.2);
 

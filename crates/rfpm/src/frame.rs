@@ -12,6 +12,20 @@ fn mw_to_dbm(mw: f64) -> f64 {
     10.0 * mw.log10()
 }
 
+/// Readings within this many dB of a frame's highest count as its burst ([`Frame::burst`]):
+/// enough for a transmission's own peaks (an LTE uplink's are a few dB), far less than its
+/// distance to the idle noise.
+pub const BURST_GATE_DB: f64 = 10.0;
+
+/// A frame's burst: see [`Frame::burst`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Burst {
+    /// The power average of the burst's readings, in dBm.
+    pub rms_dbm: f64,
+    /// The share of the frame's readings in the burst, 0 to 1.
+    pub duty: f64,
+}
+
 /// The readings of one frame (normally [`READINGS_PER_FRAME`]), in dBm as the meter sent them.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Frame {
@@ -41,6 +55,29 @@ impl Frame {
             .iter()
             .copied()
             .fold(f64::NEG_INFINITY, f64::max)
+    }
+
+    /// The burst in the frame: the power average of only the readings within
+    /// [`BURST_GATE_DB`] of its highest, and the share of readings that is (the duty). For a
+    /// bursty transmitter that is its power while transmitting, idle time left out; a frame
+    /// without a burst keeps (nearly) all readings, so its burst is its mean. `None` for an
+    /// empty frame.
+    pub fn burst(&self) -> Option<Burst> {
+        let gate = self.max_dbm() - BURST_GATE_DB;
+        let on: Vec<f64> = self
+            .readings
+            .iter()
+            .copied()
+            .filter(|&dbm| dbm >= gate)
+            .collect();
+        if on.is_empty() {
+            return None;
+        }
+        let mw: f64 = on.iter().map(|&dbm| dbm_to_mw(dbm)).sum();
+        Some(Burst {
+            rms_dbm: mw_to_dbm(mw / on.len() as f64),
+            duty: on.len() as f64 / self.readings.len() as f64,
+        })
     }
 
     /// Whether the frame has all its readings (the first one after connecting usually hasn't).
@@ -137,6 +174,28 @@ impl FrameCollector {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn burst_leaves_out_the_idle_time() {
+        // A quarter of the block transmitting at about -7 dBm, the rest idle at -60.
+        let mut readings = vec![-60.0; 300];
+        readings.extend([-6.0, -8.0, -7.0, -7.0].iter().cycle().take(100));
+        let frame = Frame { readings };
+        let burst = frame.burst().unwrap();
+        assert!((burst.rms_dbm - -6.94).abs() < 0.01);
+        assert_eq!(burst.duty, 0.25);
+        // Over the whole block the mean is 6 dB lower.
+        assert!((frame.mean_dbm() - -12.96).abs() < 0.01);
+
+        // No burst: noise within the gate, all of it counts.
+        let noise = Frame {
+            readings: vec![-59.5, -60.0, -60.5, -60.0],
+        };
+        let burst = noise.burst().unwrap();
+        assert_eq!(burst.duty, 1.0);
+        assert!((burst.rms_dbm - noise.mean_dbm()).abs() < 1e-9);
+        assert_eq!(Frame { readings: vec![] }.burst(), None);
+    }
 
     #[test]
     fn mean_is_a_power_average() {
