@@ -69,6 +69,9 @@ const DEFAULT_RATE: u8 = 2;
 const RATE_CHECK_BLOCKS: usize = 16;
 const RATE_CHECK_MIN: usize = 5;
 
+/// How long the history bar shows where an export went.
+const EXPORT_NOTE: Duration = Duration::from_secs(8);
+
 /// How often to try reconnecting.
 const RECONNECT_EVERY: Duration = Duration::from_secs(1);
 
@@ -157,6 +160,8 @@ struct App {
     started_wall: DateTime<Local>,
     /// The block plot's dB axis.
     block_y: YScale,
+    /// The last export: when, what to show, and the file's full path.
+    export_note: Option<(Instant, String, String)>,
     ports: Vec<MeterPort>,
     port_choice: String,
     link: Option<Link>,
@@ -213,6 +218,7 @@ impl App {
             started: now,
             started_wall: Local::now(),
             block_y: YScale::Fit,
+            export_note: None,
             ports: Vec::new(),
             port_choice: stored("port").unwrap_or_else(|| AUTO.to_owned()),
             link: None,
@@ -942,6 +948,24 @@ impl App {
                 );
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .add_enabled(stats.is_some(), egui::Button::new("Export"))
+                    .on_hover_text(
+                        "Save the blocks in view as CSV (one row per block: time, span, peak, \
+                         rms, avg, min, then its 500 readings) to the exports folder next to \
+                         the program",
+                    )
+                    .clicked()
+                {
+                    self.export(now);
+                }
+                if let Some((at, note, path)) = &self.export_note
+                    && at.elapsed() < EXPORT_NOTE
+                {
+                    ui.label(RichText::new(note).color(palette.accent))
+                        .on_hover_text(path);
+                    return;
+                }
                 let summary = match stats {
                     Some(stats) => format!(
                         "in view: {} blocks · mean {:.1} · max {:.1} · min {:.1} dBm",
@@ -952,6 +976,31 @@ impl App {
                 ui.label(RichText::new(summary).color(palette.muted));
             });
         });
+    }
+
+    /// Saves the blocks in view as CSV in `exports` next to the program, and notes where.
+    fn export(&mut self, now: f64) {
+        let (from, to) = self.view.range(now);
+        let entries: Vec<_> = self.history.between(from, to).collect();
+        let csv = history::to_csv(entries.iter().copied(), self.started_wall);
+        let name = format!("rfpm-{}.csv", Local::now().format("%Y%m%d-%H%M%S"));
+        let folder = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|dir| dir.join("exports")))
+            .unwrap_or_else(|| "exports".into());
+        let saved =
+            std::fs::create_dir_all(&folder).and_then(|()| std::fs::write(folder.join(&name), csv));
+        let (note, path) = match saved {
+            Ok(()) => (
+                format!("saved exports/{name} ({} blocks)", entries.len()),
+                folder.join(&name).display().to_string(),
+            ),
+            Err(error) => (
+                format!("export failed: {error}"),
+                folder.display().to_string(),
+            ),
+        };
+        self.export_note = Some((Instant::now(), note, path));
     }
 
     /// Seconds since start as local clock time.

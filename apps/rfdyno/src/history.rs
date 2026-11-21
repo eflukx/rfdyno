@@ -4,6 +4,9 @@
 use std::collections::VecDeque;
 use std::time::Duration;
 
+use std::fmt::Write as _;
+
+use chrono::{DateTime, Local, TimeDelta};
 use rfpm::{Frame, dbm_to_mw};
 
 /// How long the history goes back. At the fastest rates (~7 blocks a second, 500 samples of
@@ -165,6 +168,41 @@ impl History {
     }
 }
 
+/// `entries` as CSV, one row per block: the local time it came in (`start` is second 0), its
+/// span, peak, RMS (power average), plain average of the dBm readings and minimum, then its
+/// readings. Everything in dBm (ms for the span); comma-separated, decimal point.
+pub fn to_csv<'a>(entries: impl IntoIterator<Item = &'a Entry>, start: DateTime<Local>) -> String {
+    let entries: Vec<&Entry> = entries.into_iter().collect();
+    let samples = entries
+        .iter()
+        .map(|entry| entry.samples.len())
+        .max()
+        .unwrap_or(0);
+    let mut csv = String::from("time,span_ms,peak_dbm,rms_dbm,avg_dbm,min_dbm");
+    for i in 1..=samples {
+        let _ = write!(csv, ",s{i}");
+    }
+    csv.push('\n');
+    for entry in entries {
+        let at = start + TimeDelta::milliseconds((entry.at * 1000.0).round() as i64);
+        let _ = write!(
+            csv,
+            "{},{:.3},{:.1},{:.2},{:.2},{:.1}",
+            at.format("%Y-%m-%dT%H:%M:%S%.3f"),
+            entry.span * 1000.0,
+            entry.max,
+            entry.mean,
+            entry.log_mean,
+            entry.min
+        );
+        for dbm in &entry.samples {
+            let _ = write!(csv, ",{dbm:.1}");
+        }
+        csv.push('\n');
+    }
+    csv
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -243,6 +281,30 @@ mod tests {
         assert_eq!(shown(1.5, 3.5), [1.0, 2.0, 3.0, 4.0]);
         assert_eq!(shown(4.5, 9.0), [4.0]);
         assert_eq!(shown(-5.0, -1.0), [1.0]);
+    }
+
+    #[test]
+    fn csv_one_row_per_block() {
+        use chrono::TimeZone;
+
+        let start = Local.with_ymd_and_hms(2026, 11, 21, 22, 40, 0).unwrap();
+        let history = history(&[1.5, 2.25]);
+        let csv = to_csv(history.entries(), start);
+        let lines: Vec<&str> = csv.lines().collect();
+        assert_eq!(
+            lines[0],
+            "time,span_ms,peak_dbm,rms_dbm,avg_dbm,min_dbm,s1,s2"
+        );
+        assert_eq!(
+            lines[1],
+            "2026-11-21T22:40:01.500,2.000,-10.0,-12.60,-15.00,-20.0,-20.0,-10.0"
+        );
+        assert!(lines[2].starts_with("2026-11-21T22:40:02.250,"));
+        assert_eq!(lines.len(), 3);
+        assert_eq!(
+            to_csv([], start),
+            "time,span_ms,peak_dbm,rms_dbm,avg_dbm,min_dbm\n"
+        );
     }
 
     #[test]
