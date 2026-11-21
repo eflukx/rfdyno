@@ -40,6 +40,7 @@ Rust driver and a small viewer for the cheap USB "RF-Power-Meter-V5.0" (100 kHz 
 cargo run -p rfdyno
 cargo run -p rfpm --example stream [port|auto] [MHz] [attenuation dB]   # one line per block
 CFLAGS_x86_64_pc_windows_gnu=-D_WIN32_WINNT=0x0601 cargo build --release --target x86_64-pc-windows-gnu -p rfdyno
+python3 tools/icon.py                          # redraw the icon (needs Pillow)
 ```
 
 ## The protocol

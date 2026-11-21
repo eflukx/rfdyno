@@ -102,6 +102,7 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("RFdyno")
+            .with_icon(icon())
             .with_inner_size([900.0, 760.0])
             .with_min_inner_size([480.0, 480.0]),
         ..Default::default()
@@ -111,6 +112,15 @@ fn main() -> eframe::Result {
         options,
         Box::new(|cc| Ok(Box::new(App::new(cc)))),
     )
+}
+
+/// The window's icon: 64 x 64 RGBA, drawn by `tools/icon.py` (as the executable's).
+fn icon() -> egui::IconData {
+    egui::IconData {
+        rgba: include_bytes!("../assets/icon-64.rgba").to_vec(),
+        width: 64,
+        height: 64,
+    }
 }
 
 /// The block plot's traces, each on or off.
@@ -1316,6 +1326,12 @@ fn format_power(dbm: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn icon_is_whole() {
+        let icon = icon();
+        assert_eq!(icon.rgba.len(), (icon.width * icon.height * 4) as usize);
+    }
 
     #[test]
     fn traces_round_trip() {
