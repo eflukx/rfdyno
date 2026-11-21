@@ -1116,23 +1116,27 @@ impl App {
                 );
 
             ui.separator();
-            ui.add_enabled_ui(sampling, |ui| {
-                theme::toggle(ui, &mut self.trigger, "Trigger")
-                    .on_hover_text(
-                        "Capture every block whose RMS goes over the threshold: marked in the \
-                         history, kept apart from it (the last 1000), the last one shown in the \
-                         block plot",
-                    )
-                    .on_disabled_hover_text("Viewing a file: no blocks come in to trigger on");
-                ui.label("rms >");
-                ui.add(
-                    egui::DragValue::new(&mut self.trigger_dbm)
-                        .range(-70.0..=30.0)
-                        .speed(0.1)
-                        .fixed_decimals(1)
-                        .suffix(" dBm"),
-                );
-            });
+            let toggled = theme::toggle(ui, &mut self.trigger, "Trigger")
+                .on_hover_text(
+                    "Capture every block whose RMS goes over the threshold: marked in the \
+                     history, kept apart from it (the last 1000), the last one shown in the block \
+                     plot. Switching it on or changing the threshold also picks them from the \
+                     history already there (a file's too).",
+                )
+                .changed();
+            ui.label("rms >");
+            let threshold = ui.add(
+                egui::DragValue::new(&mut self.trigger_dbm)
+                    .range(-70.0..=30.0)
+                    .speed(0.1)
+                    .fixed_decimals(1)
+                    .suffix(" dBm"),
+            );
+            // Rescanning copies the blocks it keeps: once a drag ends, not on every step.
+            let moved = threshold.drag_stopped() || (threshold.changed() && !threshold.dragged());
+            if (toggled || moved) && self.trigger {
+                self.rescan_captures();
+            }
             if !self.captures.is_empty() {
                 ui.label(
                     RichText::new(format!("{} captured", self.captures.len())).color(palette.alarm),
@@ -1294,6 +1298,9 @@ impl App {
             .fold(f64::NEG_INFINITY, f64::max);
         let blocks = entries.len();
         self.history.replace(entries);
+        if self.trigger {
+            self.rescan_captures();
+        }
         let margin = ((to - from) * 0.02).max(0.05);
         self.view.live = false;
         self.view.set_window(to - from + 2.0 * margin);
@@ -1358,6 +1365,15 @@ impl App {
 
     fn shown_capture(&self) -> Option<&history::Entry> {
         self.shown_capture_at().map(|(_, capture)| capture)
+    }
+
+    /// Picks the captures again for the current threshold, from the history already there (see
+    /// [`rescan`]); the view follows the newest again.
+    fn rescan_captures(&mut self) {
+        self.captures = rescan(&self.captures, self.history.entries(), self.trigger_dbm);
+        self.browsed_capture = None;
+        self.dismissed_capture = None;
+        self.left_capture = None;
     }
 
     /// Back to the captures after Back to live: at the one on screen then, if it's still kept
@@ -1540,16 +1556,41 @@ fn export_files() -> Vec<std::path::PathBuf> {
     files
 }
 
-/// Keeps `entry` in `captures` when its RMS is over `threshold`, dropping the oldest beyond
+/// Whether `entry` triggers at `threshold`: its RMS is over it, and it's a real reading.
+fn triggers(entry: &history::Entry, threshold: f64) -> bool {
+    // ±99.9 dBm is the meter saying it has no valid reading, not a level.
+    let invalid = |dbm: f32| f64::from(dbm.abs()) >= INVALID_DBM;
+    f64::from(entry.mean) > threshold && !(invalid(entry.min) && invalid(entry.max))
+}
+
+/// The captures for a new `threshold`, after the fact: those from before `history` still over
+/// it, then every block in `history` over it, at most [`MAX_CAPTURES`] (the newest).
+fn rescan(
+    captures: &VecDeque<history::Entry>,
+    history: &VecDeque<history::Entry>,
+    threshold: f64,
+) -> VecDeque<history::Entry> {
+    let history_from = history.front().map_or(f64::INFINITY, |entry| entry.at);
+    let older = captures.iter().filter(|capture| capture.at < history_from);
+    let mut rescanned: VecDeque<history::Entry> = older
+        .chain(history)
+        .filter(|entry| triggers(entry, threshold))
+        .cloned()
+        .collect();
+    while rescanned.len() > MAX_CAPTURES {
+        rescanned.pop_front();
+    }
+    rescanned
+}
+
+/// Keeps `entry` in `captures` when it [`triggers`] at `threshold`, dropping the oldest beyond
 /// [`MAX_CAPTURES`]. Returns whether it was kept.
 fn capture(
     captures: &mut VecDeque<history::Entry>,
     entry: &history::Entry,
     threshold: f64,
 ) -> bool {
-    // ±99.9 dBm is the meter saying it has no valid reading, not a level.
-    let invalid = |dbm: f32| f64::from(dbm.abs()) >= INVALID_DBM;
-    if f64::from(entry.mean) <= threshold || (invalid(entry.min) && invalid(entry.max)) {
+    if !triggers(entry, threshold) {
         return false;
     }
     captures.push_back(entry.clone());
@@ -1675,6 +1716,32 @@ mod tests {
                 .iter()
                 .all(|entry| !capture(&mut none, entry, -20.0))
         );
+    }
+
+    #[test]
+    fn captures_after_the_fact() {
+        let mut history = History::default();
+        for (at, dbm) in [(1.0, -40.0), (2.0, -25.0), (3.0, -15.0), (4.0, -5.0)] {
+            history.push(
+                at,
+                Duration::from_millis(2),
+                &Frame {
+                    readings: vec![dbm; 4],
+                },
+            );
+        }
+        let at = |captures: &VecDeque<history::Entry>| -> Vec<f64> {
+            captures.iter().map(|entry| entry.at).collect()
+        };
+        // An old capture from before the history, and one now in it.
+        let mut older = history.entries()[3].clone();
+        older.at = 0.5;
+        let captures: VecDeque<_> = [older, history.entries()[3].clone()].into();
+        let rescanned = rescan(&captures, history.entries(), -20.0);
+        assert_eq!(at(&rescanned), [0.5, 3.0, 4.0]);
+        // A higher level drops what's under it, the older one too when under.
+        assert_eq!(at(&rescan(&captures, history.entries(), -10.0)), [0.5, 4.0]);
+        assert!(rescan(&captures, history.entries(), 0.0).is_empty());
     }
 
     #[test]
