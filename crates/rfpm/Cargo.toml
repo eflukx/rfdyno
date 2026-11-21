@@ -1,0 +1,9 @@
+[package]
+name = "rfpm"
+description = "Driver for the USB \"RF-Power-Meter-V5.0\" (100 kHz to 10 GHz, 0 to -60 dBm)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serialport.workspace = true

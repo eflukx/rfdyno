@@ -1,0 +1,16 @@
+[workspace]
+members = ["crates/rfpm"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+serialport = { version = "4.10", default-features = false, features = ["usbportinfo-interface"] }
+
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1
