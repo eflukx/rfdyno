@@ -20,6 +20,10 @@
 //!   and highest reading, at the time it was sampled; zoomed in, every sample. It follows the newest block (Live); dragging looks back, a click shows
 //!   that block in the Block plot. The line above it sums up what's in view.
 //!
+//! - **Trigger**: every block whose RMS goes over the threshold is captured (the last 1000),
+//!   marked in the history; the block plot then shows the last capture (‹ › step through
+//!   them, Back to live runs live until the next one, Captures goes back), Export the captures.
+//!
 //! On both plots the wheel zooms the time axis and Ctrl+wheel the dB axis, dragging pans the
 //! time axis, and a double click switches the dB axis between fitting the data and the full
 //! range. The history's time axis is clock time.
@@ -68,6 +72,12 @@ const DEFAULT_RATE: u8 = 2;
 /// Blocks the rate check looks at (the last ones since a setting), and how many it needs.
 const RATE_CHECK_BLOCKS: usize = 16;
 const RATE_CHECK_MIN: usize = 5;
+
+/// Readings this far from 0 (±99.9 dBm) are the meter's "no valid reading", not a level.
+const INVALID_DBM: f64 = 99.85;
+
+/// The most blocks the trigger keeps (about 2 kB each).
+const MAX_CAPTURES: usize = 1000;
 
 /// How long the history bar shows where an export went.
 const EXPORT_NOTE: Duration = Duration::from_secs(8);
@@ -197,6 +207,19 @@ struct App {
     /// Which traces the block plot shows.
     traces: Traces,
     history: History,
+    /// Trigger mode: capture every block whose RMS goes over `trigger_dbm`.
+    trigger: bool,
+    trigger_dbm: f64,
+    /// The blocks the trigger caught, oldest first, kept apart from the history (at most
+    /// [`MAX_CAPTURES`]).
+    captures: VecDeque<history::Entry>,
+    /// The capture Back to live put away (its time): the block plot runs live until a newer one.
+    dismissed_capture: Option<f64>,
+    /// The capture stepped to with ‹ ›, by its time; `None` follows the newest.
+    browsed_capture: Option<f64>,
+    /// The capture on screen when Back to live was pressed, by its time: Captures goes back
+    /// to it.
+    left_capture: Option<f64>,
     view: HistoryView,
     theme: Theme,
 }
@@ -211,12 +234,13 @@ impl App {
         theme::install(&cc.egui_ctx, theme);
 
         let now = Instant::now();
+        let started_wall = Local::now();
         let rate = parsed(cc, "sample_rate")
             .and_then(SampleRate::new)
             .unwrap_or_else(|| SampleRate::new(DEFAULT_RATE).expect("the default rate exists"));
         let mut app = Self {
             started: now,
-            started_wall: Local::now(),
+            started_wall,
             block_y: YScale::Fit,
             export_note: None,
             ports: Vec::new(),
@@ -244,7 +268,13 @@ impl App {
             arrivals: VecDeque::new(),
             traces: Traces::from_setting(&stored("traces").unwrap_or_default()),
             history: History::default(),
-            view: HistoryView::new(parsed(cc, "history_window").unwrap_or(60.0)),
+            trigger: parsed(cc, "trigger").unwrap_or(false),
+            trigger_dbm: parsed(cc, "trigger_dbm").unwrap_or(-20.0),
+            captures: VecDeque::new(),
+            dismissed_capture: None,
+            browsed_capture: None,
+            left_capture: None,
+            view: HistoryView::new(parsed(cc, "history_window").unwrap_or(60.0), started_wall),
             theme,
         };
         app.set_always_on_top(&cc.egui_ctx);
@@ -389,6 +419,10 @@ impl App {
         self.frames.clear();
         self.reset_peaks();
         self.history.clear();
+        self.captures.clear();
+        self.browsed_capture = None;
+        self.dismissed_capture = None;
+        self.left_capture = None;
         self.view.picked = None;
     }
 
@@ -412,6 +446,11 @@ impl App {
                         let arrived = (arrived - self.started).as_secs_f64();
                         let middle = history::sampled_middle(arrived, block);
                         self.history.push(middle, block, &frame);
+                        if self.trigger
+                            && let Some(entry) = self.history.entries().back()
+                        {
+                            capture(&mut self.captures, entry, self.trigger_dbm);
+                        }
                         self.frames.push_back((now, frame));
                     }
                     Ok(Message::Settings(settings)) => {
@@ -797,6 +836,17 @@ impl App {
                             .color(palette.echo),
                     );
                 }
+                (None, None) if let Some((index, capture)) = self.shown_capture_at() => {
+                    ui.label(
+                        RichText::new(format!(
+                            "triggered at {} · {} / {}",
+                            self.wall(capture.at),
+                            index + 1,
+                            self.captures.len()
+                        ))
+                        .color(palette.alarm),
+                    );
+                }
                 (None, None) => {
                     ui.label(RichText::new(rate_summary(self.active_rate)).color(palette.muted));
                 }
@@ -816,6 +866,35 @@ impl App {
                     }
                     return;
                 }
+                if self.held.is_none()
+                    && let Some((index, _)) = self.shown_capture_at()
+                {
+                    if ui
+                        .button("Back to live")
+                        .on_hover_text("Run live again until the trigger catches the next block")
+                        .clicked()
+                    {
+                        self.left_capture = self.shown_capture().map(|capture| capture.at);
+                        self.browsed_capture = None;
+                        self.dismissed_capture = self.captures.back().map(|capture| capture.at);
+                    }
+                    let newest = index + 1 == self.captures.len();
+                    if ui
+                        .add_enabled(!newest, egui::Button::new("›"))
+                        .on_hover_text("Next capture")
+                        .clicked()
+                    {
+                        self.step_capture(1);
+                    }
+                    if ui
+                        .add_enabled(index > 0, egui::Button::new("‹"))
+                        .on_hover_text("Previous capture")
+                        .clicked()
+                    {
+                        self.step_capture(-1);
+                    }
+                    return;
+                }
                 if ui
                     .button("Reset peaks")
                     .on_hover_text("Clear the peak trace and the peak reading")
@@ -832,6 +911,19 @@ impl App {
                         self.hold();
                     } else {
                         self.held = None;
+                    }
+                }
+                // Back to the trigger view after Back to live: the newest capture, then ‹ ›.
+                if self.trigger && self.held.is_none() && !self.captures.is_empty() {
+                    let label = format!("Captures ({})", self.captures.len());
+                    if ui
+                        .button(RichText::new(label).color(palette.alarm))
+                        .on_hover_text(
+                            "Back to the captured blocks, at the one you were looking at",
+                        )
+                        .clicked()
+                    {
+                        self.resume_captures();
                     }
                 }
             });
@@ -854,6 +946,17 @@ impl App {
                 width: 1.5,
             });
             entry.span
+        } else if self.held.is_none()
+            && let Some(capture) = self.shown_capture()
+        {
+            let values = capture.frame().readings;
+            traces.push(Trace {
+                name: "triggered",
+                values,
+                color: palette.alarm,
+                width: 1.5,
+            });
+            capture.span
         } else if let Some(held) = &self.held {
             let shown = [
                 (self.traces.last, "last", &held.last, palette.muted, 1.0),
@@ -950,14 +1053,38 @@ impl App {
                      switch the dB axis between fit and full",
                 );
 
+            ui.separator();
+            theme::toggle(ui, &mut self.trigger, "Trigger").on_hover_text(
+                "Capture every block whose RMS goes over the threshold: marked in the history, \
+                 kept apart from it (the last 1000), the last one shown in the block plot",
+            );
+            ui.label("rms >");
+            ui.add(
+                egui::DragValue::new(&mut self.trigger_dbm)
+                    .range(-70.0..=30.0)
+                    .speed(0.1)
+                    .fixed_decimals(1)
+                    .suffix(" dBm"),
+            );
+            if !self.captures.is_empty() {
+                ui.label(
+                    RichText::new(format!("{} captured", self.captures.len())).color(palette.alarm),
+                );
+            }
+
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let captures = self.shown_capture().is_some();
+                let (label, what) = if captures {
+                    ("Export captures", "the blocks the trigger caught")
+                } else {
+                    ("Export", "the blocks in view")
+                };
                 if ui
-                    .add_enabled(stats.is_some(), egui::Button::new("Export"))
-                    .on_hover_text(
-                        "Save the blocks in view as CSV (one row per block: time, span, peak, \
-                         rms, avg, min, then its 500 readings) to the exports folder next to \
-                         the program",
-                    )
+                    .add_enabled(captures || stats.is_some(), egui::Button::new(label))
+                    .on_hover_text(format!(
+                        "Save {what} as CSV (one row per block: time, span, peak, rms, avg, min, \
+                         then its 500 readings) to the exports folder next to the program"
+                    ))
                     .clicked()
                 {
                     self.export(now);
@@ -984,7 +1111,11 @@ impl App {
     /// Saves the blocks in view as CSV in `exports` next to the program, and notes where.
     fn export(&mut self, now: f64) {
         let (from, to) = self.view.range(now);
-        let entries: Vec<_> = self.history.between(from, to).collect();
+        let entries: Vec<_> = if self.shown_capture().is_some() {
+            self.captures.iter().collect()
+        } else {
+            self.history.between(from, to).collect()
+        };
         let csv = history::to_csv(entries.iter().copied(), self.started_wall);
         let name = format!("rfpm-{}.csv", Local::now().format("%Y%m%d-%H%M%S"));
         let folder = std::env::current_exe()
@@ -1004,6 +1135,52 @@ impl App {
             ),
         };
         self.export_note = Some((Instant::now(), note, path));
+    }
+
+    /// The capture the block plot shows while the trigger is on, and its index: the one
+    /// stepped to with ‹ ›, else the newest (unless Back to live put it away).
+    fn shown_capture_at(&self) -> Option<(usize, &history::Entry)> {
+        if !self.trigger {
+            return None;
+        }
+        if let Some(at) = self.browsed_capture
+            && let Some(index) = self.captures.iter().position(|capture| capture.at == at)
+        {
+            return Some((index, &self.captures[index]));
+        }
+        let index = self.captures.len().checked_sub(1)?;
+        let newest = &self.captures[index];
+        (Some(newest.at) != self.dismissed_capture).then_some((index, newest))
+    }
+
+    /// The capture the block plot shows, if any (see [`Self::shown_capture_at`]).
+    fn shown_capture(&self) -> Option<&history::Entry> {
+        self.shown_capture_at().map(|(_, capture)| capture)
+    }
+
+    /// Back to the captures after Back to live: at the one on screen then, if it's still kept
+    /// (the newest follows new ones), else at the newest.
+    fn resume_captures(&mut self) {
+        let newest = self.captures.back().map(|capture| capture.at);
+        let kept = self
+            .left_capture
+            .filter(|at| self.captures.iter().any(|capture| capture.at == *at));
+        self.browsed_capture = kept.filter(|at| Some(*at) != newest);
+        self.dismissed_capture = None;
+    }
+
+    /// Steps the shown capture by `step` (‹ is -1, › is +1); past the newest it follows new ones.
+    fn step_capture(&mut self, step: isize) {
+        let Some((index, _)) = self.shown_capture_at() else {
+            return;
+        };
+        let target = index.saturating_add_signed(step);
+        if step > 0 && target >= self.captures.len() - 1 {
+            self.browsed_capture = None;
+        } else {
+            self.browsed_capture = self.captures.get(target).map(|capture| capture.at);
+        }
+        self.dismissed_capture = None;
     }
 
     /// Seconds since start as local clock time.
@@ -1043,15 +1220,17 @@ impl eframe::App for App {
             let stats = self.history.stats(from, to);
             self.history_bar(ui, now, stats);
             let history_height = ui.available_height().max(100.0);
-            let start = self.started_wall;
             plots::history(
                 ui,
                 history_height,
                 &self.history,
                 &mut self.view,
                 now,
-                start,
                 full,
+                self.trigger.then_some(plots::Trigger {
+                    threshold: self.trigger_dbm,
+                    captures: &self.captures,
+                }),
             );
         });
         if self.link.is_some() || self.want_connected {
@@ -1070,8 +1249,29 @@ impl eframe::App for App {
         storage.set_string("traces", self.traces.to_setting());
         storage.set_string("auto_reconnect", self.auto_reconnect.to_string());
         storage.set_string("history_window", self.view.window.to_string());
+        storage.set_string("trigger", self.trigger.to_string());
+        storage.set_string("trigger_dbm", self.trigger_dbm.to_string());
         storage.set_string("always_on_top", self.always_on_top.to_string());
     }
+}
+
+/// Keeps `entry` in `captures` when its RMS is over `threshold`, dropping the oldest beyond
+/// [`MAX_CAPTURES`]. Returns whether it was kept.
+fn capture(
+    captures: &mut VecDeque<history::Entry>,
+    entry: &history::Entry,
+    threshold: f64,
+) -> bool {
+    // ±99.9 dBm is the meter saying it has no valid reading, not a level.
+    let invalid = |dbm: f32| f64::from(dbm.abs()) >= INVALID_DBM;
+    if f64::from(entry.mean) <= threshold || (invalid(entry.min) && invalid(entry.max)) {
+        return false;
+    }
+    captures.push_back(entry.clone());
+    while captures.len() > MAX_CAPTURES {
+        captures.pop_front();
+    }
+    true
 }
 
 /// The rates a rate check found: `K05`, `K01–K04`.
@@ -1132,6 +1332,57 @@ mod tests {
                 average: true,
                 peak: true
             }
+        );
+    }
+
+    #[test]
+    fn captures_over_the_threshold() {
+        let mut history = History::default();
+        for (at, dbm) in [(1.0, -30.0), (2.0, -20.0), (3.0, -10.0)] {
+            history.push(
+                at,
+                Duration::from_millis(2),
+                &Frame {
+                    readings: vec![dbm; 4],
+                },
+            );
+        }
+        let mut captures = VecDeque::new();
+        let caught: Vec<bool> = history
+            .entries()
+            .iter()
+            .map(|entry| capture(&mut captures, entry, -20.0))
+            .collect();
+        // Over, not at: -20 dBm doesn't trigger at -20.
+        assert_eq!(caught, [false, false, true]);
+        assert_eq!(captures.len(), 1);
+        let loud = &history.entries()[2];
+        for _ in 0..MAX_CAPTURES + 5 {
+            capture(&mut captures, loud, -20.0);
+        }
+        assert_eq!(captures.len(), MAX_CAPTURES);
+        // The meter's +99.9 and -99.9 dBm (no valid reading) never trigger.
+        let mut invalid = History::default();
+        invalid.push(
+            9.0,
+            Duration::from_millis(2),
+            &Frame {
+                readings: vec![99.9; 4],
+            },
+        );
+        invalid.push(
+            9.5,
+            Duration::from_millis(2),
+            &Frame {
+                readings: vec![-99.9, 99.9],
+            },
+        );
+        let mut none = VecDeque::new();
+        assert!(
+            invalid
+                .entries()
+                .iter()
+                .all(|entry| !capture(&mut none, entry, -20.0))
         );
     }
 

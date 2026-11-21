@@ -21,6 +21,12 @@ Rust driver and a small viewer for the cheap USB "RF-Power-Meter-V5.0" (100 kHz 
     readings) in an `exports`
     folder next to the program.
 
+  - a trigger: every block whose RMS goes over a threshold is captured, marked in the history
+    and kept apart from it (the last 1000), so the blocks where something happens are
+    separated from the quiet ones. While it's on, the block plot shows the last capture (‹ ›
+    step through the captures, Back to live runs live until the next one, Captures goes back to them) and Export saves the
+    captures. Blocks of only ±99.9 dBm, the meter's "no valid reading", don't trigger.
+
   On both plots, scroll zooms the time axis, Ctrl+scroll the dB axis, and a double click
   switches the dB axis between fitting the data and the meter's full range.
 

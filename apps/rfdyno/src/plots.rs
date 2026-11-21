@@ -6,7 +6,9 @@
 
 use chrono::{DateTime, Local, TimeDelta};
 use egui::{Color32, PointerButton, Stroke, Vec2, Vec2b};
-use egui_plot::{FilledArea, HoverPosition, Line, Plot, PlotPoints, PlotUi, VLine};
+use egui_plot::{
+    FilledArea, HLine, HoverPosition, Line, LineStyle, Plot, PlotPoints, PlotUi, Span, VLine,
+};
 
 use crate::history::{History, KEEP};
 use crate::theme;
@@ -193,6 +195,12 @@ fn sample_at(x: f64, period_ms: f64) -> Option<usize> {
         .then_some(index as usize)
 }
 
+/// What the history plot shows of the trigger: its threshold and the blocks it caught.
+pub struct Trigger<'a> {
+    pub threshold: f64,
+    pub captures: &'a std::collections::VecDeque<crate::history::Entry>,
+}
+
 /// The narrowest history window, in seconds: 10 µs, five samples at the fastest rate.
 const MIN_WINDOW: f64 = 1e-5;
 
@@ -209,17 +217,20 @@ pub struct HistoryView {
     pub picked: Option<f64>,
     /// The dB axis.
     pub y: YScale,
+    /// The local clock time at second 0: the time axis shows clock time.
+    pub start: DateTime<Local>,
 }
 
 impl HistoryView {
-    /// A live view `window` seconds wide.
-    pub fn new(window: f64) -> Self {
+    /// A live view `window` seconds wide, clock time `start` at second 0.
+    pub fn new(window: f64, start: DateTime<Local>) -> Self {
         Self {
             live: true,
             window,
             end: 0.0,
             picked: None,
             y: YScale::Fit,
+            start,
         }
     }
 
@@ -265,10 +276,11 @@ pub fn history(
     history: &History,
     view: &mut HistoryView,
     now: f64,
-    start: DateTime<Local>,
     full: (f64, f64),
+    trigger: Option<Trigger<'_>>,
 ) {
     let palette = theme::c();
+    let start = view.start;
     let response = Plot::new("history")
         .height(height)
         .show_background(false)
@@ -356,6 +368,23 @@ pub fn history(
                         .color(palette.accent)
                         .width(1.5),
                 );
+            }
+            if let Some(trigger) = &trigger {
+                plot.hline(
+                    HLine::new("trigger", trigger.threshold)
+                        .color(palette.alarm)
+                        .style(LineStyle::dashed_loose())
+                        .width(1.0)
+                        .allow_hover(false),
+                );
+                for capture in trigger
+                    .captures
+                    .iter()
+                    .filter(|c| c.at + c.span >= from && c.at - c.span <= to)
+                {
+                    let (from, to) = (capture.start(), capture.start() + capture.span);
+                    plot.span(Span::new("", from..=to).fill(palette.alarm.gamma_multiply(0.18)));
+                }
             }
             if let Some(picked) = view.picked {
                 plot.vline(VLine::new("picked", picked).color(palette.echo).width(1.5));
@@ -572,7 +601,7 @@ mod tests {
 
     #[test]
     fn view_range_and_zoom() {
-        let mut view = HistoryView::new(60.0);
+        let mut view = HistoryView::new(60.0, Local::now());
         assert_eq!(view.range(100.0), (40.0, 100.0));
         view.zoom(2.0, Some(70.0), 100.0);
         assert_eq!(view.range(100.0), (70.0, 100.0));
