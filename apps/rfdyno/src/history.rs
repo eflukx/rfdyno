@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use std::fmt::Write as _;
 
-use chrono::{DateTime, Local, TimeDelta};
+use chrono::{DateTime, Local, NaiveDateTime, TimeDelta, TimeZone};
 use rfpm::{Frame, dbm_to_mw};
 
 /// How long the history goes back. At the fastest rates (~7 blocks a second, 500 samples of
@@ -33,6 +33,19 @@ pub struct Entry {
     pub log_mean: f32,
     /// The readings in dBm.
     pub samples: Box<[f32]>,
+    /// The meter's settings it was measured with.
+    pub meta: Meta,
+}
+
+/// The meter's settings a block was measured with.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Meta {
+    /// The frequency (calibration) in MHz.
+    pub frequency_mhz: u16,
+    /// The attenuation the meter added, in dB.
+    pub attenuation_db: f32,
+    /// The sample rate's code: 8 for `K08`.
+    pub rate: u8,
 }
 
 impl Entry {
@@ -102,6 +115,8 @@ pub struct Stats {
 #[derive(Debug, Default)]
 pub struct History {
     entries: VecDeque<Entry>,
+    /// The settings recorded with each block pushed from now on.
+    pub meta: Meta,
 }
 
 impl History {
@@ -117,6 +132,7 @@ impl History {
             min: frame.min_dbm() as f32,
             max: frame.max_dbm() as f32,
             samples,
+            meta: self.meta,
         });
         let keep_from = at - KEEP.as_secs_f64();
         while self
@@ -126,6 +142,12 @@ impl History {
         {
             self.entries.pop_front();
         }
+    }
+
+    /// Replaces everything with `entries` (as [`from_csv`] reads them), in time order.
+    pub fn replace(&mut self, mut entries: Vec<Entry>) {
+        entries.sort_by(|a, b| a.at.total_cmp(&b.at));
+        self.entries = entries.into();
     }
 
     /// Forgets everything.
@@ -211,7 +233,7 @@ impl History {
 }
 
 /// `entries` as CSV, one row per block: the local time its sampling started (`start` is
-/// second 0), its
+/// second 0), the meter's settings (frequency, attenuation, rate), its
 /// span, peak, RMS (power average), plain average of the dBm readings and minimum, then its
 /// readings. Everything in dBm (ms for the span); comma-separated, decimal point.
 pub fn to_csv<'a>(entries: impl IntoIterator<Item = &'a Entry>, start: DateTime<Local>) -> String {
@@ -221,7 +243,7 @@ pub fn to_csv<'a>(entries: impl IntoIterator<Item = &'a Entry>, start: DateTime<
         .map(|entry| entry.samples.len())
         .max()
         .unwrap_or(0);
-    let mut csv = String::from("time,span_ms,peak_dbm,rms_dbm,avg_dbm,min_dbm");
+    let mut csv = String::from(CSV_HEADER);
     for i in 1..=samples {
         let _ = write!(csv, ",s{i}");
     }
@@ -230,8 +252,11 @@ pub fn to_csv<'a>(entries: impl IntoIterator<Item = &'a Entry>, start: DateTime<
         let at = start + TimeDelta::milliseconds((entry.start() * 1000.0).round() as i64);
         let _ = write!(
             csv,
-            "{},{:.3},{:.1},{:.2},{:.2},{:.1}",
+            "{},{},{:.1},K{:02},{:.3},{:.1},{:.2},{:.2},{:.1}",
             at.format("%Y-%m-%dT%H:%M:%S%.3f"),
+            entry.meta.frequency_mhz,
+            entry.meta.attenuation_db,
+            entry.meta.rate,
             entry.span * 1000.0,
             entry.max,
             entry.mean,
@@ -244,6 +269,88 @@ pub fn to_csv<'a>(entries: impl IntoIterator<Item = &'a Entry>, start: DateTime<
         csv.push('\n');
     }
     csv
+}
+
+/// The columns before the readings in [`to_csv`]'s rows.
+const CSV_HEADER: &str = "time,freq_mhz,atten_db,rate,span_ms,peak_dbm,rms_dbm,avg_dbm,min_dbm";
+
+/// The columns before the readings in exports from before the settings were recorded.
+const CSV_HEADER_WITHOUT_SETTINGS: &str = "time,span_ms,peak_dbm,rms_dbm,avg_dbm,min_dbm";
+
+/// Reads blocks back from CSV as [`to_csv`] writes it, timed in seconds since `start`.
+/// Exports from before the settings columns read too, their settings unknown (zero).
+pub fn from_csv(text: &str, start: DateTime<Local>) -> Result<Vec<Entry>, String> {
+    let mut lines = text.lines();
+    let header = lines.next().unwrap_or_default();
+    let with_settings = header.starts_with(CSV_HEADER);
+    if !with_settings && !header.starts_with(CSV_HEADER_WITHOUT_SETTINGS) {
+        return Err("not an rfpm export (its first line differs)".to_owned());
+    }
+    let mut entries = Vec::new();
+    for (number, line) in lines.enumerate().map(|(i, line)| (i + 2, line)) {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let entry = csv_row(line, start, with_settings)
+            .map_err(|error| format!("line {number}: {error}"))?;
+        entries.push(entry);
+    }
+    Ok(entries)
+}
+
+/// One row of [`to_csv`] as an entry (`with_settings`: with the settings columns).
+fn csv_row(line: &str, start: DateTime<Local>, with_settings: bool) -> Result<Entry, String> {
+    let mut fields = line.split(',');
+    let mut next = |name: &str| fields.next().ok_or_else(|| format!("no {name}"));
+    let time = next("time")?;
+    let naive = NaiveDateTime::parse_from_str(time, "%Y-%m-%dT%H:%M:%S%.f")
+        .map_err(|error| format!("time {time:?}: {error}"))?;
+    let sampled = Local
+        .from_local_datetime(&naive)
+        .earliest()
+        .ok_or_else(|| format!("time {time:?} doesn't exist here"))?;
+    let number = |name: &str, text: &str| {
+        text.trim()
+            .parse::<f64>()
+            .map_err(|_| format!("{name} {text:?} isn't a number"))
+    };
+    let meta = if with_settings {
+        let frequency_mhz = number("frequency", next("frequency")?)? as u16;
+        let attenuation_db = number("attenuation", next("attenuation")?)? as f32;
+        let rate_text = next("rate")?;
+        let rate = rate_text
+            .trim()
+            .strip_prefix('K')
+            .and_then(|code| code.parse::<u8>().ok())
+            .ok_or_else(|| format!("rate {rate_text:?} isn't K01 to K18"))?;
+        Meta {
+            frequency_mhz,
+            attenuation_db,
+            rate,
+        }
+    } else {
+        Meta::default()
+    };
+    let span = number("span", next("span")?)? / 1000.0;
+    let max = number("peak", next("peak")?)? as f32;
+    let mean = number("rms", next("rms")?)? as f32;
+    let log_mean = number("avg", next("avg")?)? as f32;
+    let min = number("min", next("min")?)? as f32;
+    let samples = fields
+        .filter(|field| !field.trim().is_empty())
+        .map(|field| number("reading", field).map(|dbm| dbm as f32))
+        .collect::<Result<Box<[f32]>, _>>()?;
+    let since_start = (sampled - start).num_microseconds().unwrap_or(0) as f64 / 1e6;
+    Ok(Entry {
+        at: since_start + span / 2.0,
+        span,
+        mean,
+        min,
+        max,
+        log_mean,
+        samples,
+        meta,
+    })
 }
 
 #[cfg(test)]
@@ -331,22 +438,32 @@ mod tests {
         use chrono::TimeZone;
 
         let start = Local.with_ymd_and_hms(2026, 11, 21, 22, 40, 0).unwrap();
-        let history = history(&[1.5, 2.25]);
+        let mut history = History {
+            meta: Meta {
+                frequency_mhz: 830,
+                attenuation_db: 30.0,
+                rate: 8,
+            },
+            ..History::default()
+        };
+        for at in [1.5, 2.25] {
+            history.push(at, SPAN, &frame(&[-20.0, -10.0]));
+        }
         let csv = to_csv(history.entries(), start);
         let lines: Vec<&str> = csv.lines().collect();
         assert_eq!(
             lines[0],
-            "time,span_ms,peak_dbm,rms_dbm,avg_dbm,min_dbm,s1,s2"
+            "time,freq_mhz,atten_db,rate,span_ms,peak_dbm,rms_dbm,avg_dbm,min_dbm,s1,s2"
         );
         assert_eq!(
             lines[1],
-            "2026-11-21T22:40:01.499,2.000,-10.0,-12.60,-15.00,-20.0,-20.0,-10.0"
+            "2026-11-21T22:40:01.499,830,30.0,K08,2.000,-10.0,-12.60,-15.00,-20.0,-20.0,-10.0"
         );
         assert!(lines[2].starts_with("2026-11-21T22:40:02.249,"));
         assert_eq!(lines.len(), 3);
         assert_eq!(
             to_csv([], start),
-            "time,span_ms,peak_dbm,rms_dbm,avg_dbm,min_dbm\n"
+            "time,freq_mhz,atten_db,rate,span_ms,peak_dbm,rms_dbm,avg_dbm,min_dbm\n"
         );
     }
 
@@ -372,6 +489,67 @@ mod tests {
         assert_eq!(entry.samples_between(4.8, 5.0), 2);
         assert_eq!(entry.samples_between(5.2, 6.0), 0);
         assert_eq!(entry.samples_between(4.0, 4.7), 0);
+    }
+
+    #[test]
+    fn csv_reads_back() {
+        use chrono::TimeZone;
+
+        let start = Local.with_ymd_and_hms(2026, 11, 21, 22, 40, 0).unwrap();
+        let mut history = History {
+            meta: Meta {
+                frequency_mhz: 900,
+                attenuation_db: -2.5,
+                rate: 13,
+            },
+            ..History::default()
+        };
+        history.push(
+            1.5,
+            Duration::from_millis(500),
+            &frame(&[-20.5, -10.0, -30.2]),
+        );
+        history.push(
+            4.0,
+            Duration::from_millis(500),
+            &frame(&[-60.0, -59.5, -61.0]),
+        );
+        let csv = to_csv(history.entries(), start);
+        // Read with another start: the same clock times, other seconds.
+        let later = start + TimeDelta::seconds(10);
+        let read = from_csv(&csv, later).unwrap();
+        assert_eq!(read.len(), 2);
+        for (original, back) in history.entries().iter().zip(&read) {
+            assert!((back.at - (original.at - 10.0)).abs() < 1e-3);
+            assert!((back.span - original.span).abs() < 1e-6);
+            assert!((back.mean - original.mean).abs() < 0.01);
+            assert!((back.log_mean - original.log_mean).abs() < 0.01);
+            assert_eq!((back.min, back.max), (original.min, original.max));
+            assert_eq!(back.samples.len(), original.samples.len());
+            assert_eq!(back.meta, original.meta);
+        }
+        assert_eq!(read[0].samples[2], -30.2);
+
+        assert!(
+            from_csv("a,b,c\n", start)
+                .unwrap_err()
+                .contains("not an rfpm export")
+        );
+        // An older export, without the settings columns.
+        let old = format!(
+            "{CSV_HEADER_WITHOUT_SETTINGS},s1\n2026-11-21T22:40:01.000,2.000,-1.0,-1.00,-1.00,-1.0,-1.0\n"
+        );
+        let old = from_csv(&old, start).unwrap();
+        assert_eq!(old[0].meta, Meta::default());
+        assert_eq!(&*old[0].samples, [-1.0]);
+        let bad = format!("{CSV_HEADER}\n2026-11-21T22:40:01.000,830,0.0,K02,x,1,2,3,4\n");
+        assert_eq!(
+            from_csv(&bad, start).unwrap_err(),
+            "line 2: span \"x\" isn't a number"
+        );
+        let mut replaced = History::default();
+        replaced.replace(read.into_iter().rev().collect());
+        assert!(replaced.entries()[0].at < replaced.entries()[1].at);
     }
 
     #[test]

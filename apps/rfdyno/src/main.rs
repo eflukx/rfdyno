@@ -79,8 +79,8 @@ const INVALID_DBM: f64 = 99.85;
 /// The most blocks the trigger keeps (about 2 kB each).
 const MAX_CAPTURES: usize = 1000;
 
-/// How long the history bar shows where an export went.
-const EXPORT_NOTE: Duration = Duration::from_secs(8);
+/// How long the history bar shows what an export or open did.
+const NOTE_FOR: Duration = Duration::from_secs(8);
 
 /// How often to try reconnecting.
 const RECONNECT_EVERY: Duration = Duration::from_secs(1);
@@ -180,8 +180,10 @@ struct App {
     started_wall: DateTime<Local>,
     /// The block plot's dB axis.
     block_y: YScale,
-    /// The last export: when, what to show, and the file's full path.
-    export_note: Option<(Instant, String, String)>,
+    /// The last export or open: when, what to show, and the file's full path.
+    note: Option<(Instant, String, String)>,
+    /// The export file being viewed, if one is (viewing mode: no meter, no sampling).
+    file: Option<String>,
     ports: Vec<MeterPort>,
     port_choice: String,
     link: Option<Link>,
@@ -252,7 +254,8 @@ impl App {
             started: now,
             started_wall,
             block_y: YScale::Fit,
-            export_note: None,
+            note: None,
+            file: None,
             ports: Vec::new(),
             port_choice: stored("port").unwrap_or_else(|| AUTO.to_owned()),
             link: None,
@@ -335,6 +338,7 @@ impl App {
     /// Opens the chosen port and sets the meter. Keeps the history; a failure leaves the
     /// reason in the status (and auto-reconnect tries again).
     fn connect(&mut self, ctx: &egui::Context) {
+        self.close_file();
         self.link = None;
         self.reported = None;
         self.applying = Applying::Idle;
@@ -455,6 +459,14 @@ impl App {
                         let block = self.active_rate.block();
                         let arrived = (arrived - self.started).as_secs_f64();
                         let middle = history::sampled_middle(arrived, block);
+                        // With the settings it was measured with: as the meter reported them,
+                        // else as set here; the rate as last sent.
+                        let settings = self.reported.unwrap_or(self.wanted);
+                        self.history.meta = history::Meta {
+                            frequency_mhz: settings.frequency_mhz,
+                            attenuation_db: settings.attenuation_db as f32,
+                            rate: self.active_rate.code(),
+                        };
                         self.history.push(middle, block, &frame);
                         if self.trigger
                             && let Some(entry) = self.history.entries().back()
@@ -1031,19 +1043,33 @@ impl App {
         let palette = theme::c();
         ui.horizontal(|ui| {
             ui.label(RichText::new("History").font(theme::semibold_font(17.0)));
-            ui.add_space(8.0);
-            let mut live = self.view.live;
-            if theme::toggle(ui, &mut live, "Live")
-                .on_hover_text("Follow the newest block")
-                .clicked()
-            {
-                if live {
-                    self.view.go_live();
-                } else {
-                    self.view.live = false;
-                    self.view.end = now;
-                }
+            if let Some(file) = &self.file {
+                ui.label(RichText::new(file).color(palette.echo))
+                    .on_hover_text(
+                        "Viewing an export: no meter, no sampling. Connect goes back to live.",
+                    );
             }
+            ui.add_space(8.0);
+            // Viewing a file there's no newest block, nor any coming in: no Live, no trigger.
+            let sampling = self.file.is_none();
+            if !sampling {
+                self.view.live = false;
+            }
+            ui.add_enabled_ui(sampling, |ui| {
+                let mut live = self.view.live;
+                if theme::toggle(ui, &mut live, "Live")
+                    .on_hover_text("Follow the newest block")
+                    .on_disabled_hover_text("Viewing a file: nothing new comes in")
+                    .clicked()
+                {
+                    if live {
+                        self.view.go_live();
+                    } else {
+                        self.view.live = false;
+                        self.view.end = now;
+                    }
+                }
+            });
             egui::ComboBox::from_id_salt("window")
                 .selected_text(plots::format_span(self.view.window))
                 .show_ui(ui, |ui| {
@@ -1064,18 +1090,23 @@ impl App {
                 );
 
             ui.separator();
-            theme::toggle(ui, &mut self.trigger, "Trigger").on_hover_text(
-                "Capture every block whose RMS goes over the threshold: marked in the history, \
-                 kept apart from it (the last 1000), the last one shown in the block plot",
-            );
-            ui.label("rms >");
-            ui.add(
-                egui::DragValue::new(&mut self.trigger_dbm)
-                    .range(-70.0..=30.0)
-                    .speed(0.1)
-                    .fixed_decimals(1)
-                    .suffix(" dBm"),
-            );
+            ui.add_enabled_ui(sampling, |ui| {
+                theme::toggle(ui, &mut self.trigger, "Trigger")
+                    .on_hover_text(
+                        "Capture every block whose RMS goes over the threshold: marked in the \
+                         history, kept apart from it (the last 1000), the last one shown in the \
+                         block plot",
+                    )
+                    .on_disabled_hover_text("Viewing a file: no blocks come in to trigger on");
+                ui.label("rms >");
+                ui.add(
+                    egui::DragValue::new(&mut self.trigger_dbm)
+                        .range(-70.0..=30.0)
+                        .speed(0.1)
+                        .fixed_decimals(1)
+                        .suffix(" dBm"),
+                );
+            });
             if !self.captures.is_empty() {
                 ui.label(
                     RichText::new(format!("{} captured", self.captures.len())).color(palette.alarm),
@@ -1083,24 +1114,61 @@ impl App {
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let captures = self.shown_capture().is_some();
-                let (label, what) = if captures {
-                    ("Export captures", "the blocks the trigger caught")
-                } else {
-                    ("Export", "the blocks in view")
-                };
-                if ui
-                    .add_enabled(captures || stats.is_some(), egui::Button::new(label))
-                    .on_hover_text(format!(
-                        "Save {what} as CSV (one row per block: time, span, peak, rms, avg, min, \
-                         then its 500 readings) to the exports folder next to the program"
-                    ))
-                    .clicked()
-                {
-                    self.export(now);
-                }
-                if let Some((at, note, path)) = &self.export_note
-                    && at.elapsed() < EXPORT_NOTE
+                ui.menu_button("Open", |ui| {
+                    let files = export_files();
+                    if files.is_empty() {
+                        ui.label(RichText::new("No exports yet").color(palette.muted));
+                    }
+                    for path in files {
+                        let name = path
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .into_owned();
+                        if ui.button(name).clicked() {
+                            self.open(&path);
+                            ui.close();
+                        }
+                    }
+                    ui.separator();
+                    ui.label(RichText::new("or drop an export on the window").color(palette.muted));
+                })
+                .response
+                .on_hover_text(
+                    "Look at an export again: viewing mode, no sampling; Connect goes back to live",
+                );
+                ui.menu_button("Export", |ui| {
+                    let in_view = stats.map_or(0, |stats| stats.blocks);
+                    if ui
+                        .add_enabled(
+                            in_view > 0,
+                            egui::Button::new(format!("Blocks in view ({in_view})")),
+                        )
+                        .clicked()
+                    {
+                        self.export(now, false);
+                        ui.close();
+                    }
+                    let captured = self.captures.len();
+                    if ui
+                        .add_enabled(
+                            captured > 0,
+                            egui::Button::new(format!("Captures ({captured})")),
+                        )
+                        .clicked()
+                    {
+                        self.export(now, true);
+                        ui.close();
+                    }
+                })
+                .response
+                .on_hover_text(
+                    "Save as CSV to the exports folder next to the program: one row per block \
+                     (time, frequency, attenuation, rate, span, peak, rms, avg, min, then its 500 \
+                     readings)",
+                );
+                if let Some((at, note, path)) = &self.note
+                    && at.elapsed() < NOTE_FOR
                 {
                     ui.label(RichText::new(note).color(palette.accent))
                         .on_hover_text(path);
@@ -1118,20 +1186,17 @@ impl App {
         });
     }
 
-    /// Saves the blocks in view as CSV in `exports` next to the program, and notes where.
-    fn export(&mut self, now: f64) {
+    /// Saves the blocks in view, or the captures, as CSV in the exports folder, and notes where.
+    fn export(&mut self, now: f64, captures: bool) {
         let (from, to) = self.view.range(now);
-        let entries: Vec<_> = if self.shown_capture().is_some() {
+        let entries: Vec<_> = if captures {
             self.captures.iter().collect()
         } else {
             self.history.between(from, to).collect()
         };
         let csv = history::to_csv(entries.iter().copied(), self.started_wall);
         let name = format!("rfpm-{}.csv", Local::now().format("%Y%m%d-%H%M%S"));
-        let folder = std::env::current_exe()
-            .ok()
-            .and_then(|exe| exe.parent().map(|dir| dir.join("exports")))
-            .unwrap_or_else(|| "exports".into());
+        let folder = exports_folder();
         let saved =
             std::fs::create_dir_all(&folder).and_then(|()| std::fs::write(folder.join(&name), csv));
         let (note, path) = match saved {
@@ -1144,7 +1209,62 @@ impl App {
                 folder.display().to_string(),
             ),
         };
-        self.export_note = Some((Instant::now(), note, path));
+        self.note = Some((Instant::now(), note, path));
+    }
+
+    /// Opens an export to look at: disconnects (viewing mode: no sampling) and puts its blocks
+    /// in the history, scrolled to them. Connect goes back to live.
+    fn open(&mut self, path: &std::path::Path) {
+        let name = path.file_name().map_or_else(
+            || path.display().to_string(),
+            |name| name.to_string_lossy().into_owned(),
+        );
+        let read = std::fs::read_to_string(path)
+            .map_err(|error| error.to_string())
+            .and_then(|text| history::from_csv(&text, self.started_wall));
+        let entries = match read {
+            Ok(entries) if !entries.is_empty() => entries,
+            Ok(_) => {
+                self.note = Some((Instant::now(), format!("{name}: no blocks"), String::new()));
+                return;
+            }
+            Err(error) => {
+                let path = path.display().to_string();
+                self.note = Some((Instant::now(), format!("can't open {name}: {error}"), path));
+                return;
+            }
+        };
+        self.disconnect();
+        self.reset();
+        self.held = None;
+        let from = entries
+            .iter()
+            .map(history::Entry::start)
+            .fold(f64::INFINITY, f64::min);
+        let to = entries
+            .iter()
+            .map(|entry| entry.start() + entry.span)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let blocks = entries.len();
+        self.history.replace(entries);
+        let margin = ((to - from) * 0.02).max(0.05);
+        self.view.live = false;
+        self.view.set_window(to - from + 2.0 * margin);
+        self.view.end = to + margin;
+        self.file = Some(name.clone());
+        self.note = Some((
+            Instant::now(),
+            format!("opened {name} ({blocks} blocks)"),
+            path.display().to_string(),
+        ));
+    }
+
+    /// Leaves viewing mode: forgets the file's blocks.
+    fn close_file(&mut self) {
+        if self.file.take().is_some() {
+            self.reset();
+            self.view.go_live();
+        }
     }
 
     /// The capture the block plot shows while the trigger is on, and its index: the one
@@ -1202,6 +1322,17 @@ impl App {
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        let dropped = ctx.input(|input| {
+            let files = input
+                .raw
+                .dropped_files
+                .iter()
+                .map(|file| file.path().to_path_buf());
+            files.collect::<Vec<_>>()
+        });
+        if let Some(path) = dropped.first() {
+            self.open(path);
+        }
         self.receive();
         self.keep_connected(&ctx);
         egui::Panel::top("top").show(ui, |ui| {
@@ -1263,6 +1394,33 @@ impl eframe::App for App {
         storage.set_string("trigger_dbm", self.trigger_dbm.to_string());
         storage.set_string("always_on_top", self.always_on_top.to_string());
     }
+}
+
+/// The exports folder: `exports` next to the program.
+fn exports_folder() -> std::path::PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("exports")))
+        .unwrap_or_else(|| "exports".into())
+}
+
+/// The CSV files in the exports folder, newest first (at most 20).
+fn export_files() -> Vec<std::path::PathBuf> {
+    let Ok(dir) = std::fs::read_dir(exports_folder()) else {
+        return Vec::new();
+    };
+    let mut files: Vec<_> = dir
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("csv"))
+        })
+        .collect();
+    files.sort();
+    files.reverse();
+    files.truncate(20);
+    files
 }
 
 /// Keeps `entry` in `captures` when its RMS is over `threshold`, dropping the oldest beyond

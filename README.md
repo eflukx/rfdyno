@@ -15,17 +15,18 @@ Rust driver and a small viewer for the cheap USB "RF-Power-Meter-V5.0" (100 kHz 
     band on a clock-time axis, each block at the time it was sampled (not when it arrived over
     USB). Zoomed in until the samples fit, it shows every sample instead, gaps between blocks
     included. It follows the newest block live; drag to look back, and click a block to show
-    it in the block plot. Hovering a block shows its peak, RMS (the power
-    average), the plain average of its dBm readings, and its minimum. Export saves the blocks
-    in view as CSV (one row per block: when its sampling started, those figures, then its 500
-    readings) in an `exports`
-    folder next to the program.
-
+    it in the block plot. Hovering a block shows its peak, RMS (the power average), the plain
+    average of its dBm readings, and its minimum. Export saves either the
+    blocks in view or the trigger's captures as CSV in an `exports` folder next to the program:
+    one row per block with when its sampling started, the meter's frequency, attenuation and
+    sample rate, its figures, then its 500 readings. Open (or dropping a file on the window)
+    loads an export again for a look later: viewing mode, no meter and no sampling, with
+    everything else working as on live data; Connect goes back to live;
   - a trigger: every block whose RMS goes over a threshold is captured, marked in the history
     and kept apart from it (the last 1000), so the blocks where something happens are
     separated from the quiet ones. While it's on, the block plot shows the last capture (‹ ›
-    step through the captures, Back to live runs live until the next one, Captures goes back to them) and Export saves the
-    captures. Blocks of only ±99.9 dBm, the meter's "no valid reading", don't trigger.
+    step through the captures, Back to live runs live until the next one, Captures goes back
+    to them). Blocks of only ±99.9 dBm, the meter's "no valid reading", don't trigger.
 
   On both plots, scroll zooms the time axis, Ctrl+scroll the dB axis, and a double click
   switches the dB axis between fitting the data and the meter's full range.
