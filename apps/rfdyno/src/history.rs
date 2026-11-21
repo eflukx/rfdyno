@@ -20,7 +20,8 @@ const GAP_MARGIN_S: f64 = 1.5;
 /// One block in the history.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Entry {
-    /// When it arrived, in seconds since the viewer started.
+    /// The middle of the time it was sampled, in seconds since the viewer started (see
+    /// [`sampled_middle`]).
     pub at: f64,
     /// How long the block spans, in seconds (its sample rate).
     pub span: f64,
@@ -35,12 +36,53 @@ pub struct Entry {
 }
 
 impl Entry {
+    /// When its first sample was taken, in seconds since start.
+    pub fn start(&self) -> f64 {
+        self.at - self.span / 2.0
+    }
+
+    /// The time between its samples, in seconds.
+    pub fn period(&self) -> f64 {
+        self.span / self.samples.len().max(1) as f64
+    }
+
+    /// When sample `index` was taken, in seconds since start.
+    pub fn sample_time(&self, index: usize) -> f64 {
+        self.start() + index as f64 * self.period()
+    }
+
+    /// The sample taken nearest to `at`, if `at` is within the block.
+    pub fn sample_at(&self, at: f64) -> Option<f32> {
+        let index = ((at - self.start()) / self.period()).round();
+        (index >= 0.0)
+            .then(|| self.samples.get(index as usize).copied())
+            .flatten()
+    }
+
+    /// How many of its samples were taken between `from` and `to`.
+    pub fn samples_between(&self, from: f64, to: f64) -> usize {
+        let last = self.samples.len() as f64 - 1.0;
+        let first = ((from - self.start()) / self.period()).ceil().max(0.0);
+        let end = ((to - self.start()) / self.period()).floor().min(last);
+        if end >= first {
+            (end - first) as usize + 1
+        } else {
+            0
+        }
+    }
+
     /// The block back as a [`Frame`].
     pub fn frame(&self) -> Frame {
         Frame {
             readings: self.samples.iter().map(|&dbm| f64::from(dbm)).collect(),
         }
     }
+}
+
+/// The middle of the time a block was sampled, from when it `arrived` (seconds since start) and
+/// its `span`: the meter samples the block, then spends [`rfpm::BLOCK_TRANSFER`] sending it.
+pub fn sampled_middle(arrived: f64, span: Duration) -> f64 {
+    arrived - rfpm::BLOCK_TRANSFER.as_secs_f64() - span.as_secs_f64() / 2.0
 }
 
 /// What a stretch of history holds.
@@ -63,7 +105,7 @@ pub struct History {
 }
 
 impl History {
-    /// Adds a block that arrived at `at` (seconds since start) and spans `span`.
+    /// Adds a block sampled around `at` (its middle, seconds since start) over `span`.
     pub fn push(&mut self, at: f64, span: Duration, frame: &Frame) {
         let samples: Box<[f32]> = frame.readings.iter().map(|&dbm| dbm as f32).collect();
         self.entries.push_back(Entry {
@@ -168,7 +210,8 @@ impl History {
     }
 }
 
-/// `entries` as CSV, one row per block: the local time it came in (`start` is second 0), its
+/// `entries` as CSV, one row per block: the local time its sampling started (`start` is
+/// second 0), its
 /// span, peak, RMS (power average), plain average of the dBm readings and minimum, then its
 /// readings. Everything in dBm (ms for the span); comma-separated, decimal point.
 pub fn to_csv<'a>(entries: impl IntoIterator<Item = &'a Entry>, start: DateTime<Local>) -> String {
@@ -184,7 +227,7 @@ pub fn to_csv<'a>(entries: impl IntoIterator<Item = &'a Entry>, start: DateTime<
     }
     csv.push('\n');
     for entry in entries {
-        let at = start + TimeDelta::milliseconds((entry.at * 1000.0).round() as i64);
+        let at = start + TimeDelta::milliseconds((entry.start() * 1000.0).round() as i64);
         let _ = write!(
             csv,
             "{},{:.3},{:.1},{:.2},{:.2},{:.1}",
@@ -297,14 +340,38 @@ mod tests {
         );
         assert_eq!(
             lines[1],
-            "2026-11-21T22:40:01.500,2.000,-10.0,-12.60,-15.00,-20.0,-20.0,-10.0"
+            "2026-11-21T22:40:01.499,2.000,-10.0,-12.60,-15.00,-20.0,-20.0,-10.0"
         );
-        assert!(lines[2].starts_with("2026-11-21T22:40:02.250,"));
+        assert!(lines[2].starts_with("2026-11-21T22:40:02.249,"));
         assert_eq!(lines.len(), 3);
         assert_eq!(
             to_csv([], start),
             "time,span_ms,peak_dbm,rms_dbm,avg_dbm,min_dbm\n"
         );
+    }
+
+    #[test]
+    fn sample_times() {
+        // Arrived at 10 s, 2 ms span: sampled 148 + 2 ms before, the middle 1 ms in.
+        assert!((sampled_middle(10.0, SPAN) - 9.851).abs() < 1e-9);
+        let mut history = History::default();
+        history.push(
+            5.0,
+            Duration::from_millis(500),
+            &frame(&[-30.0, -20.0, -10.0, 0.0, 10.0]),
+        );
+        let entry = &history.entries()[0];
+        assert_eq!(entry.start(), 4.75);
+        assert_eq!(entry.period(), 0.1);
+        assert!((entry.sample_time(2) - 4.95).abs() < 1e-9);
+        assert_eq!(entry.sample_at(4.96), Some(-10.0));
+        assert_eq!(entry.sample_at(4.6), None);
+        assert_eq!(entry.sample_at(5.3), None);
+        // Samples at 4.75, 4.85, … 5.15.
+        assert_eq!(entry.samples_between(0.0, 10.0), 5);
+        assert_eq!(entry.samples_between(4.8, 5.0), 2);
+        assert_eq!(entry.samples_between(5.2, 6.0), 0);
+        assert_eq!(entry.samples_between(4.0, 4.7), 0);
     }
 
     #[test]

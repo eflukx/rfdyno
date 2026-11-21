@@ -12,10 +12,13 @@ Rust driver and a small viewer for the cheap USB "RF-Power-Meter-V5.0" (100 kHz 
     and a peak hold, with a Hold button that freezes it; hovering shows all three at that
     moment;
   - a scrollable history of every block from the last 30 minutes, with the mean and min–max
-    band on a clock-time axis. It follows the newest block live; drag to look back, and click
-    a block to show it in the block plot. Hovering a block shows its peak, RMS (the power
+    band on a clock-time axis, each block at the time it was sampled (not when it arrived over
+    USB). Zoomed in until the samples fit, it shows every sample instead, gaps between blocks
+    included. It follows the newest block live; drag to look back, and click a block to show
+    it in the block plot. Hovering a block shows its peak, RMS (the power
     average), the plain average of its dBm readings, and its minimum. Export saves the blocks
-    in view as CSV (one row per block: those figures, then its 500 readings) in an `exports`
+    in view as CSV (one row per block: when its sampling started, those figures, then its 500
+    readings) in an `exports`
     folder next to the program.
 
   On both plots, scroll zooms the time axis, Ctrl+scroll the dB axis, and a double click

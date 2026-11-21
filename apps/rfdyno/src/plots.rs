@@ -19,6 +19,10 @@ pub struct Trace {
     pub width: f32,
 }
 
+/// The history draws every sample while there are at most this many per point of its width;
+/// beyond that, one point per block.
+const SAMPLES_PER_POINT: f32 = 2.0;
+
 /// How strongly one notch of the wheel zooms.
 const WHEEL_ZOOM: f32 = 0.0025;
 
@@ -189,8 +193,8 @@ fn sample_at(x: f64, period_ms: f64) -> Option<usize> {
         .then_some(index as usize)
 }
 
-/// The narrowest history window, in seconds.
-const MIN_WINDOW: f64 = 0.5;
+/// The narrowest history window, in seconds: 10 µs, five samples at the fastest rate.
+const MIN_WINDOW: f64 = 1e-5;
 
 /// What the history plot looks at.
 #[derive(Debug, Clone, PartialEq)]
@@ -249,8 +253,10 @@ impl HistoryView {
 }
 
 /// Plots the history: the band between each block's lowest and highest reading, the block means
-/// on it, and the picked block, the time axis in clock time (`start` is second 0). Hovering
-/// shows the block's peak, RMS (power average), plain average of the dBm readings and minimum. Dragging
+/// on it, and the picked block, the time axis in clock time (`start` is second 0); zoomed in
+/// so far that the samples fit, every sample at the time it was taken. Hovering shows the
+/// block's peak, RMS (power average), plain average of the dBm readings and minimum, and the
+/// sample under the pointer when samples are shown. Dragging
 /// looks back (and stops following), the wheel zooms the time axis (live: the window, which
 /// keeps following), a click picks a block.
 pub fn history(
@@ -273,14 +279,13 @@ pub fn history(
         .allow_boxed_zoom(false)
         .grid_color(palette.rule)
         .y_axis_min_width(36.0)
-        .x_axis_formatter(move |mark, range| {
-            let fine = range.end() - range.start() < 10.0;
-            wall_clock(start, mark.value, fine)
+        .x_axis_formatter(move |mark, _| {
+            wall_clock(start, mark.value, clock_digits(mark.step_size))
         })
         .y_axis_formatter(|mark, _| format!("{:.0}", mark.value))
         .label_formatter(move |hover| {
             let (_, position) = hover_point(hover);
-            let time = wall_clock(start, position.x, true);
+            let time = wall_clock(start, position.x, 1);
             // Over a block its own tooltip (below) shows the statistics in columns.
             history
                 .at(position.x)
@@ -305,8 +310,34 @@ pub fn history(
             let data = history.stats(from, to).map(|stats| (stats.min, stats.max));
             drive_y(plot, &mut view.y, data, full);
 
-            // Including a block beyond each edge, so lines run off the edges.
-            for run in history.runs(from, to) {
+            // Zoomed in, every sample at its own time; zoomed out, each block's mean on the band
+            // between its lowest and highest reading. A block beyond each edge comes along, so
+            // lines run off the edges.
+            let runs = history.runs(from, to);
+            let samples: usize = runs
+                .iter()
+                .flatten()
+                .map(|entry| entry.samples_between(from, to))
+                .sum();
+            let width = plot.response().rect.width();
+            let detail = (samples as f32) <= width * SAMPLES_PER_POINT;
+            if detail {
+                // One line per block: nothing across the time the meter wasn't sampling.
+                for entry in runs.iter().flatten() {
+                    let points: Vec<[f64; 2]> = entry
+                        .samples
+                        .iter()
+                        .enumerate()
+                        .map(|(i, &dbm)| [entry.sample_time(i), f64::from(dbm)])
+                        .collect();
+                    plot.line(
+                        Line::new("samples", PlotPoints::new(points))
+                            .color(palette.accent)
+                            .width(1.2),
+                    );
+                }
+            }
+            for run in runs.iter().filter(|_| !detail) {
                 let xs: Vec<f64> = run.iter().map(|entry| entry.at).collect();
                 let lows: Vec<f64> = run.iter().map(|entry| f64::from(entry.min)).collect();
                 let highs: Vec<f64> = run.iter().map(|entry| f64::from(entry.max)).collect();
@@ -329,27 +360,39 @@ pub fn history(
             if let Some(picked) = view.picked {
                 plot.vline(VLine::new("picked", picked).color(palette.echo).width(1.5));
             }
-            plot.pointer_coordinate()
+            (plot.pointer_coordinate(), detail)
         });
+    let (pointer, detail) = response.inner;
 
     if response.response.clicked()
-        && let Some(pointer) = response.inner
+        && let Some(pointer) = pointer
         && let Some(entry) = history.nearest(pointer.x)
     {
         view.picked = Some(entry.at);
     }
     if response.response.hovered()
-        && let Some(pointer) = response.inner
+        && let Some(pointer) = pointer
         && let Some(entry) = history.at(pointer.x)
     {
-        let time = wall_clock(start, entry.at, true);
-        let muted = theme::c().muted;
-        let rows = [
+        let palette = theme::c();
+        let muted = palette.muted;
+        // The block's figures always; zoomed in to the samples, the one under the pointer too.
+        let sample = detail.then(|| entry.sample_at(pointer.x)).flatten();
+        // A sample: its own time, to the µs when samples are that close; else the block's.
+        let time = match sample {
+            Some(_) => wall_clock(start, pointer.x, clock_digits(entry.period()).max(3)),
+            None => wall_clock(start, entry.at, 1),
+        };
+        let mut rows = Vec::new();
+        if let Some(dbm) = sample {
+            rows.push(("sample", palette.accent, f64::from(dbm)));
+        }
+        rows.extend([
             ("peak", muted, f64::from(entry.max)),
             ("rms", muted, f64::from(entry.mean)),
             ("avg", muted, f64::from(entry.log_mean)),
             ("min", muted, f64::from(entry.min)),
-        ];
+        ]);
         response
             .response
             .on_hover_ui_at_pointer(|ui| value_tooltip(ui, &time, &rows));
@@ -398,14 +441,26 @@ fn hover_point(hover: &HoverPosition<'_>) -> (String, egui_plot::PlotPoint) {
     }
 }
 
-/// The local clock time `seconds` after `start`: `22:40:15`, or `22:40:15.3` when `fine`.
-pub fn wall_clock(start: DateTime<Local>, seconds: f64, fine: bool) -> String {
-    let at = start + TimeDelta::milliseconds((seconds * 1000.0).round() as i64);
+/// The local clock time `seconds` after `start` with `digits` decimals (0 to 6):
+/// `22:40:15`, `22:40:15.3`, `22:40:15.312`, `22:40:15.312456`.
+pub fn wall_clock(start: DateTime<Local>, seconds: f64, digits: usize) -> String {
+    let at = start + TimeDelta::microseconds((seconds * 1e6).round() as i64);
     let whole = at.format("%H:%M:%S");
-    if fine {
-        format!("{whole}.{}", at.timestamp_subsec_millis() / 100)
-    } else {
-        whole.to_string()
+    let digits = digits.min(6);
+    if digits == 0 {
+        return whole.to_string();
+    }
+    let micros = format!("{:06}", at.timestamp_subsec_micros());
+    format!("{whole}.{}", &micros[..digits])
+}
+
+/// The decimals a clock time needs to tell points `step` seconds apart.
+fn clock_digits(step: f64) -> usize {
+    match step {
+        step if step >= 1.0 => 0,
+        step if step >= 0.1 => 1,
+        step if step >= 0.001 => 3,
+        _ => 6,
     }
 }
 
@@ -420,9 +475,11 @@ pub fn format_ms(ms: f64) -> String {
     }
 }
 
-/// A span of time for a label: `45 s`, `5 min`, `1.5 min`.
+/// A span of time for a label: `40 µs`, `250 ms`, `45 s`, `5 min`, `1.5 min`.
 pub fn format_span(seconds: f64) -> String {
-    if seconds < 60.0 {
+    if seconds < 1.0 {
+        format_ms(seconds * 1000.0)
+    } else if seconds < 60.0 {
         format!("{seconds:.0} s")
     } else {
         let minutes = seconds / 60.0;
@@ -443,14 +500,22 @@ mod tests {
     #[test]
     fn clock_time() {
         let start = Local.with_ymd_and_hms(2026, 11, 21, 22, 40, 0).unwrap();
-        assert_eq!(wall_clock(start, 15.3, false), "22:40:15");
-        assert_eq!(wall_clock(start, 15.3, true), "22:40:15.3");
-        assert_eq!(wall_clock(start, -60.0, false), "22:39:00");
+        assert_eq!(wall_clock(start, 15.3, 0), "22:40:15");
+        assert_eq!(wall_clock(start, 15.3, 1), "22:40:15.3");
+        assert_eq!(wall_clock(start, 15.312_456, 3), "22:40:15.312");
+        assert_eq!(wall_clock(start, 15.312_456, 6), "22:40:15.312456");
+        assert_eq!(wall_clock(start, -60.0, 0), "22:39:00");
+        assert_eq!(clock_digits(5.0), 0);
+        assert_eq!(clock_digits(0.2), 1);
+        assert_eq!(clock_digits(0.002), 3);
+        assert_eq!(clock_digits(0.000_02), 6);
     }
 
     #[test]
     fn spans_and_milliseconds() {
         assert_eq!(format_span(45.0), "45 s");
+        assert_eq!(format_span(0.25), "250 ms");
+        assert_eq!(format_span(0.000_04), "40 µs");
         assert_eq!(format_span(300.0), "5 min");
         assert_eq!(format_span(90.0), "1.5 min");
         assert_eq!(format_ms(0.25), "250 µs");
@@ -518,9 +583,9 @@ mod tests {
         assert_eq!(view.range(100.0), (23.0, 38.0));
         view.zoom(0.5, Some(26.0), 100.0);
         assert_eq!(view.range(100.0), (20.0, 50.0));
-        view.zoom(1000.0, None, 100.0);
+        view.zoom(1e9, None, 100.0);
         assert_eq!(view.window, MIN_WINDOW);
         view.go_live();
-        assert_eq!(view.range(100.0), (99.5, 100.0));
+        assert_eq!(view.range(100.0), (100.0 - MIN_WINDOW, 100.0));
     }
 }

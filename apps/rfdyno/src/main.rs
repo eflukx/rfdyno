@@ -17,7 +17,7 @@
 //! - **Block**: the 500 samples of a block over time: the last one, the average over the
 //!   averaged blocks and the peak hold since Reset peaks, each switchable. Hold freezes it.
 //! - **History**: every block of the last 30 minutes, its mean on the band between its lowest
-//!   and highest reading. It follows the newest block (Live); dragging looks back, a click shows
+//!   and highest reading, at the time it was sampled; zoomed in, every sample. It follows the newest block (Live); dragging looks back, a click shows
 //!   that block in the Block plot. The line above it sums up what's in view.
 //!
 //! On both plots the wheel zooms the time axis and Ctrl+wheel the dB axis, dragging pans the
@@ -395,7 +395,6 @@ impl App {
     /// Takes what the threads sent, and asks for the settings again when no reply came.
     fn receive(&mut self) {
         let now = Instant::now();
-        let at = self.clock(now);
         if let Some(link) = &self.link {
             let mut lost = None;
             loop {
@@ -408,7 +407,11 @@ impl App {
                         }
                         self.peak_dbm = self.peak_dbm.max(frame.max_dbm());
                         self.peak_hold.push(&frame);
-                        self.history.push(at, self.active_rate.block(), &frame);
+                        // Timed by when it was sampled, not when it came in over USB.
+                        let block = self.active_rate.block();
+                        let arrived = (arrived - self.started).as_secs_f64();
+                        let middle = history::sampled_middle(arrived, block);
+                        self.history.push(middle, block, &frame);
                         self.frames.push_back((now, frame));
                     }
                     Ok(Message::Settings(settings)) => {
@@ -1005,7 +1008,7 @@ impl App {
 
     /// Seconds since start as local clock time.
     fn wall(&self, at: f64) -> String {
-        plots::wall_clock(self.started_wall, at, false)
+        plots::wall_clock(self.started_wall, at, 0)
     }
 }
 
