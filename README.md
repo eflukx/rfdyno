@@ -10,7 +10,8 @@ Rust driver and a small viewer for the cheap USB "RF-Power-Meter-V5.0" (100 kHz 
   - a big readout with the power in W and a peak;
   - the block plot, showing the 500 samples of a block over time: the last block, the average
     and a peak hold, with a Hold button that freezes it; hovering shows all three at that
-    moment;
+    moment. The shown block's RMS and plain average are given above it and drawn as dashed
+    and dotted lines;
   - a scrollable history of every block from the last 30 minutes, with the mean and min–max
     band on a clock-time axis, each block at the time it was sampled (not when it arrived over
     USB). Zoomed in until the samples fit, it shows every sample instead, gaps between blocks

@@ -131,6 +131,7 @@ pub fn block(
     period_ms: f64,
     y: &mut YScale,
     full: (f64, f64),
+    levels: Option<Levels>,
 ) {
     let span_ms = period_ms * (rfpm::READINGS_PER_FRAME as f64 - 1.0);
     let data = extent(traces.iter().flat_map(|trace| &trace.values));
@@ -153,6 +154,21 @@ pub fn block(
                 plot.zoom_bounds_around_hovered(Vec2::new(factor, 1.0));
             }
             drive_y(plot, y, data, full);
+            if let Some(levels) = levels {
+                let palette = theme::c();
+                for (name, dbm, style) in [
+                    ("rms", levels.rms, LineStyle::dashed_dense()),
+                    ("avg", levels.avg, LineStyle::dotted_dense()),
+                ] {
+                    plot.hline(
+                        HLine::new(name, dbm)
+                            .color(palette.text.gamma_multiply(0.6))
+                            .style(style)
+                            .width(1.0)
+                            .allow_hover(false),
+                    );
+                }
+            }
             let pointer = plot.pointer_coordinate();
             for trace in &traces {
                 let points = trace
@@ -184,6 +200,30 @@ pub fn block(
                 .response
                 .on_hover_ui_at_pointer(|ui| value_tooltip(ui, &time, &rows));
         }
+    }
+}
+
+/// A block's RMS (its power average) and the plain average of its dBm readings.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Levels {
+    pub rms: f64,
+    pub avg: f64,
+}
+
+impl Levels {
+    /// The levels of `readings` (dBm); `None` for none.
+    pub fn of(readings: &[f64]) -> Option<Self> {
+        if readings.is_empty() {
+            return None;
+        }
+        let rms = rfpm::Frame {
+            readings: readings.to_vec(),
+        }
+        .mean_dbm();
+        Some(Self {
+            rms,
+            avg: readings.iter().sum::<f64>() / readings.len() as f64,
+        })
     }
 }
 
@@ -588,6 +628,15 @@ mod tests {
         assert_eq!(sample_at(499.4, 1.0), Some(499));
         assert_eq!(sample_at(499.6, 1.0), None);
         assert_eq!(sample_at(-0.6, 1.0), None);
+    }
+
+    #[test]
+    fn block_levels() {
+        // -10 and -20 dBm: power average -12.6, plain average -15.
+        let levels = Levels::of(&[-10.0, -20.0]).unwrap();
+        assert!((levels.rms - -12.596).abs() < 1e-3);
+        assert_eq!(levels.avg, -15.0);
+        assert_eq!(Levels::of(&[]), None);
     }
 
     #[test]

@@ -873,6 +873,16 @@ impl App {
                     ui.label(RichText::new(rate_summary(self.active_rate)).color(palette.muted));
                 }
             }
+            if let Some(levels) = self.shown_levels() {
+                ui.label(
+                    RichText::new(format!("rms {:.1} · avg {:.1} dBm", levels.rms, levels.avg))
+                        .color(palette.muted),
+                )
+                .on_hover_text(
+                    "The block's RMS (its power average) and the plain average of its dBm \
+                     readings; dashed and dotted in the plot",
+                );
+            }
             if picked.is_none() {
                 ui.add_space(8.0);
                 theme::trace_toggle(ui, &mut self.traces.last, "Last", palette.muted);
@@ -1035,7 +1045,16 @@ impl App {
             self.active_rate.block().as_secs_f64()
         };
         let period_ms = span * 1000.0 / rfpm::READINGS_PER_FRAME as f64;
-        plots::block(ui, height, traces, period_ms, &mut self.block_y, full);
+        let levels = self.shown_levels();
+        plots::block(
+            ui,
+            height,
+            traces,
+            period_ms,
+            &mut self.block_y,
+            full,
+            levels,
+        );
     }
 
     /// The history bar: title, Live and the window, and what's in view at the right.
@@ -1284,6 +1303,30 @@ impl App {
     }
 
     /// The capture the block plot shows, if any (see [`Self::shown_capture_at`]).
+    /// The RMS and plain average of the block the block plot shows: the picked, held, captured
+    /// or last one.
+    fn shown_levels(&self) -> Option<plots::Levels> {
+        let of_entry = |entry: &history::Entry| plots::Levels {
+            rms: f64::from(entry.mean),
+            avg: f64::from(entry.log_mean),
+        };
+        if let Some(at) = self.view.picked {
+            return self
+                .history
+                .entries()
+                .iter()
+                .find(|entry| entry.at == at)
+                .map(of_entry);
+        }
+        if let Some(held) = &self.held {
+            return plots::Levels::of(&held.last);
+        }
+        if let Some(capture) = self.shown_capture() {
+            return Some(of_entry(capture));
+        }
+        plots::Levels::of(&self.frames.back()?.1.readings)
+    }
+
     fn shown_capture(&self) -> Option<&history::Entry> {
         self.shown_capture_at().map(|(_, capture)| capture)
     }
