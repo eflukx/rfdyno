@@ -1,0 +1,21 @@
+[package]
+name = "rfdyno"
+description = "RFdyno: a viewer for the USB RF power meter"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rfpm.workspace = true
+egui.workspace = true
+egui_plot.workspace = true
+chrono.workspace = true
+
+# Windows: Direct3D 12 only (wgpu with the one backend), for a small executable.
+[target.'cfg(windows)'.dependencies]
+eframe = { workspace = true, features = ["wgpu_no_default_features"] }
+wgpu = { version = "30", default-features = false, features = ["dx12", "std", "wgsl"] }
+
+# Elsewhere: OpenGL (glow), which runs everywhere, WSLg included.
+[target.'cfg(not(windows))'.dependencies]
+eframe = { workspace = true, features = ["glow"] }
