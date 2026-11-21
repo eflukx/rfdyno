@@ -182,6 +182,8 @@ struct App {
     block_y: YScale,
     /// The last export or open: when, what to show, and the file's full path.
     note: Option<(Instant, String, String)>,
+    /// Asking whether to clear the history.
+    confirm_clear: bool,
     /// The export file being viewed, if one is (viewing mode: no meter, no sampling).
     file: Option<String>,
     ports: Vec<MeterPort>,
@@ -256,6 +258,7 @@ impl App {
             block_y: YScale::Fit,
             note: None,
             file: None,
+            confirm_clear: false,
             ports: Vec::new(),
             port_choice: stored("port").unwrap_or_else(|| AUTO.to_owned()),
             link: None,
@@ -428,10 +431,14 @@ impl App {
         self.peak_hold.clear();
     }
 
-    /// Clears everything measured: average, peaks and history.
+    /// Clears the average and the peaks (Reset); the history stays.
     fn reset(&mut self) {
         self.frames.clear();
         self.reset_peaks();
+    }
+
+    /// Clears the history and the captures (Clear, after asking).
+    fn clear_history(&mut self) {
         self.history.clear();
         self.captures.clear();
         self.browsed_capture = None;
@@ -762,7 +769,7 @@ impl App {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
                     .button("Reset")
-                    .on_hover_text("Clear average, peaks and history")
+                    .on_hover_text("Clear the average and the peaks (Clear in the history bar clears the history)")
                     .clicked()
                 {
                     self.reset();
@@ -1133,6 +1140,7 @@ impl App {
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // Right to left: Open, Export, Clear.
                 ui.menu_button("Open", |ui| {
                     let files = export_files();
                     if files.is_empty() {
@@ -1165,7 +1173,7 @@ impl App {
                         )
                         .clicked()
                     {
-                        self.export(now, false);
+                        self.export(now, Export::View);
                         ui.close();
                     }
                     let captured = self.captures.len();
@@ -1176,7 +1184,16 @@ impl App {
                         )
                         .clicked()
                     {
-                        self.export(now, true);
+                        self.export(now, Export::Captures);
+                        ui.close();
+                    }
+                    let all = self.history.entries().len();
+                    if ui
+                        .add_enabled(all > 0, egui::Button::new(format!("All ({all})")))
+                        .on_hover_text("The whole history, up to 30 minutes")
+                        .clicked()
+                    {
+                        self.export(now, Export::All);
                         ui.close();
                     }
                 })
@@ -1186,6 +1203,16 @@ impl App {
                      (time, frequency, attenuation, rate, span, peak, rms, avg, min, then its 500 \
                      readings)",
                 );
+                if ui
+                    .add_enabled(
+                        !self.history.entries().is_empty(),
+                        egui::Button::new("Clear"),
+                    )
+                    .on_hover_text("Clear the history and the captures (asks first)")
+                    .clicked()
+                {
+                    self.confirm_clear = true;
+                }
                 if let Some((at, note, path)) = &self.note
                     && at.elapsed() < NOTE_FOR
                 {
@@ -1206,12 +1233,12 @@ impl App {
     }
 
     /// Saves the blocks in view, or the captures, as CSV in the exports folder, and notes where.
-    fn export(&mut self, now: f64, captures: bool) {
+    fn export(&mut self, now: f64, what: Export) {
         let (from, to) = self.view.range(now);
-        let entries: Vec<_> = if captures {
-            self.captures.iter().collect()
-        } else {
-            self.history.between(from, to).collect()
+        let entries: Vec<_> = match what {
+            Export::View => self.history.between(from, to).collect(),
+            Export::Captures => self.captures.iter().collect(),
+            Export::All => self.history.entries().iter().collect(),
         };
         let csv = history::to_csv(entries.iter().copied(), self.started_wall);
         let name = format!("rfpm-{}.csv", Local::now().format("%Y%m%d-%H%M%S"));
@@ -1255,6 +1282,7 @@ impl App {
         };
         self.disconnect();
         self.reset();
+        self.clear_history();
         self.held = None;
         let from = entries
             .iter()
@@ -1282,6 +1310,7 @@ impl App {
     fn close_file(&mut self) {
         if self.file.take().is_some() {
             self.reset();
+            self.clear_history();
             self.view.go_live();
         }
     }
@@ -1356,6 +1385,37 @@ impl App {
         self.dismissed_capture = None;
     }
 
+    /// Asks before clearing the history: it can't be undone.
+    fn confirm_clear_dialog(&mut self, ctx: &egui::Context) {
+        let palette = theme::c();
+        let blocks = self.history.entries().len();
+        let captures = self.captures.len();
+        let modal = egui::Modal::new(egui::Id::unique("confirm_clear")).show(ctx, |ui| {
+            ui.label(RichText::new("Clear the history?").font(theme::semibold_font(20.0)));
+            ui.add_space(4.0);
+            ui.label(format!(
+                "This forgets {blocks} blocks and {captures} captures. It can't be undone; \
+                 export first to keep them."
+            ));
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui
+                    .button(RichText::new("Clear").color(palette.alarm))
+                    .clicked()
+                {
+                    self.clear_history();
+                    self.confirm_clear = false;
+                }
+                if ui.button("Cancel").clicked() {
+                    self.confirm_clear = false;
+                }
+            });
+        });
+        if modal.should_close() {
+            self.confirm_clear = false;
+        }
+    }
+
     /// Seconds since start as local clock time.
     fn wall(&self, at: f64) -> String {
         plots::wall_clock(self.started_wall, at, 0)
@@ -1365,6 +1425,9 @@ impl App {
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        if self.confirm_clear {
+            self.confirm_clear_dialog(&ctx);
+        }
         let dropped = ctx.input(|input| {
             let files = input
                 .raw
@@ -1437,6 +1500,17 @@ impl eframe::App for App {
         storage.set_string("trigger_dbm", self.trigger_dbm.to_string());
         storage.set_string("always_on_top", self.always_on_top.to_string());
     }
+}
+
+/// What Export saves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Export {
+    /// The blocks in view.
+    View,
+    /// The trigger's captures.
+    Captures,
+    /// The whole history.
+    All,
 }
 
 /// The exports folder: `exports` next to the program.

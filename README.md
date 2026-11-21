@@ -17,12 +17,13 @@ Rust driver and a small viewer for the cheap USB "RF-Power-Meter-V5.0" (100 kHz 
     USB). Zoomed in until the samples fit, it shows every sample instead, gaps between blocks
     included. It follows the newest block live; drag to look back, and click a block to show
     it in the block plot. Hovering a block shows its peak, RMS (the power average), the plain
-    average of its dBm readings, and its minimum. Export saves either the
-    blocks in view or the trigger's captures as CSV in an `exports` folder next to the program:
+    average of its dBm readings, and its minimum. Export saves the blocks
+    in view, the trigger's captures or the whole history as CSV in an `exports` folder next to the program:
     one row per block with when its sampling started, the meter's frequency, attenuation and
     sample rate, its figures, then its 500 readings. Open (or dropping a file on the window)
     loads an export again for a look later: viewing mode, no meter and no sampling, with
-    everything else working as on live data; Connect goes back to live;
+    everything else working as on live data; Connect goes back to live. Clear forgets the
+    history and the captures, after asking;
   - a trigger: every block whose RMS goes over a threshold is captured, marked in the history
     and kept apart from it (the last 1000), so the blocks where something happens are
     separated from the quiet ones. While it's on, the block plot shows the last capture (‹ ›
