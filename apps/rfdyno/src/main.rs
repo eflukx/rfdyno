@@ -57,7 +57,7 @@ use rfpm::{
 
 use crate::history::History;
 use crate::link::{Applying, Link, Message, REPLY_TIMEOUT, SETTLE};
-use crate::plots::{HistoryView, Trace, YScale};
+use crate::plots::{HistoryView, Trace, YAxis};
 use crate::theme::Theme;
 
 /// What the port choice says to pick the first meter found.
@@ -179,7 +179,7 @@ struct App {
     /// The local clock time at `started`: the history's time axis shows clock time.
     started_wall: DateTime<Local>,
     /// The block plot's dB axis.
-    block_y: YScale,
+    block_y: YAxis,
     /// The last export or open: when, what to show, and the file's full path.
     note: Option<(Instant, String, String)>,
     /// The reference line, on or off, and its level.
@@ -258,7 +258,7 @@ impl App {
         let mut app = Self {
             started: now,
             started_wall,
-            block_y: YScale::Fit,
+            block_y: YAxis::default(),
             note: None,
             file: None,
             confirm_clear: false,

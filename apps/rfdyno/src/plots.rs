@@ -95,7 +95,14 @@ impl YScale {
 }
 
 /// Applies Ctrl+wheel and double clicks to `scale`, then sets the plot's dB axis.
-fn drive_y(plot: &mut PlotUi, scale: &mut YScale, data: Option<(f64, f64)>, full: (f64, f64)) {
+fn drive_y(plot: &mut PlotUi, axis: &mut YAxis, data: Option<(f64, f64)>, full: (f64, f64)) {
+    // Dragging the axis is egui_plot's own zoom: the range it left is a zoom by hand.
+    let bounds = plot.plot_bounds();
+    let now_shown = (bounds.min()[1], bounds.max()[1]);
+    if axis.set.is_some_and(|set| moved(set, now_shown)) {
+        axis.scale = YScale::Zoomed(now_shown.0, now_shown.1);
+    }
+    let scale = &mut axis.scale;
     let shown = scale.range(data, full);
     if let Some(factor) = ctrl_zoom(plot) {
         let centre = plot
@@ -108,6 +115,21 @@ fn drive_y(plot: &mut PlotUi, scale: &mut YScale, data: Option<(f64, f64)>, full
     }
     let (low, high) = scale.range(data, full);
     plot.set_plot_bounds_y(low..=high);
+    axis.set = Some((low, high));
+}
+
+/// A dB axis: how it's scaled, and the range set on it last frame (to tell when egui_plot moved
+/// it, because the axis was dragged).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct YAxis {
+    pub scale: YScale,
+    set: Option<(f64, f64)>,
+}
+
+/// Whether a range changed from the one set (beyond rounding).
+fn moved(set: (f64, f64), now: (f64, f64)) -> bool {
+    let tolerance = (set.1 - set.0).abs() * 1e-9;
+    (set.0 - now.0).abs() > tolerance || (set.1 - now.1).abs() > tolerance
 }
 
 /// The lowest and highest of `values` (finite ones), if any.
@@ -129,7 +151,7 @@ pub fn block(
     height: f32,
     traces: Vec<Trace>,
     period_ms: f64,
-    y: &mut YScale,
+    y: &mut YAxis,
     range: DbRange,
     levels: Option<Levels>,
 ) {
@@ -291,7 +313,10 @@ pub struct HistoryView {
     /// The block picked with a click (its arrival time), shown in the block plot.
     pub picked: Option<f64>,
     /// The dB axis.
-    pub y: YScale,
+    pub y: YAxis,
+    /// The time range set on the plot last frame: dragging the time axis (egui_plot's own
+    /// zoom) moves it, and the view then takes over what it left.
+    set_x: Option<(f64, f64)>,
     /// The local clock time at second 0: the time axis shows clock time.
     pub start: DateTime<Local>,
 }
@@ -304,7 +329,8 @@ impl HistoryView {
             window,
             end: 0.0,
             picked: None,
-            y: YScale::Fit,
+            y: YAxis::default(),
+            set_x: None,
             start,
         }
     }
@@ -392,8 +418,16 @@ pub fn history(
                 let pointer = plot.pointer_coordinate().map(|pointer| pointer.x);
                 view.zoom(f64::from(factor), pointer, now);
             }
+            let bounds = plot.plot_bounds();
+            let now_shown = (bounds.min()[0], bounds.max()[0]);
+            if view.set_x.is_some_and(|set| moved(set, now_shown)) {
+                view.live = false;
+                view.end = now_shown.1;
+                view.set_window(now_shown.1 - now_shown.0);
+            }
             let (from, to) = view.range(now);
             plot.set_plot_bounds_x(from..=to);
+            view.set_x = Some((from, to));
             let data = history.stats(from, to).map(|stats| (stats.min, stats.max));
             drive_y(plot, &mut view.y, range.with_reference(data), range.full);
             range.draw_reference(plot);
@@ -704,6 +738,13 @@ mod tests {
             range(Some(-20.0)).with_reference(None),
             Some((-20.0, -20.0))
         );
+    }
+
+    #[test]
+    fn moved_ranges() {
+        assert!(!moved((-60.0, -20.0), (-60.0, -20.0)));
+        assert!(!moved((-60.0, -20.0), (-60.0 + 1e-12, -20.0)));
+        assert!(moved((-60.0, -20.0), (-58.0, -22.0)));
     }
 
     #[test]
