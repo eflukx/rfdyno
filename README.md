@@ -51,6 +51,19 @@ CFLAGS_x86_64_pc_windows_gnu=-D_WIN32_WINNT=0x0601 cargo build --release --targe
 python3 tools/icon.py                          # redraw the icon (needs Pillow)
 ```
 
+## Example: an nRF9160 trying to attach to LTE-M
+
+![RFdyno showing an nRF9160's transmit bursts](docs/nrf9160-attach.png)
+
+An nRF9160 with its antenna port cabled to the meter through 30 dB of attenuation, its normal
+firmware trying to attach to LTE-M; no RF test mode. It barely hears the network over the
+cable, so it transmits at full power, with coverage-enhancement repetitions: long bursts of
+1 ms subframes. The trigger (rms > -20 dBm) caught 45 blocks. The block plot shows the last:
+a 30 ms burst at about 22 dBm (burst RMS 22.0 dBm, 29 % of the block). The history below
+shows every sample, with the gaps where the meter wasn't sampling. Peaks reach 25 dBm, a few
+dB over the burst RMS, as the LTE-M uplink's envelope does. The amber line is a 21.1 dBm
+reference. So the nRF9160's 23 dBm (power class 3) reaches the connector: a healthy RF path.
+
 ## The protocol
 
 The meter is an STM32F401 reading an AD8317 or AD8318 log detector (`0483:5740`, "STM32 Virtual
