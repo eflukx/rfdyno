@@ -1,0 +1,118 @@
+# Builds RFdyno for Windows, Linux and macOS when a version tag is pushed, and puts the builds
+# in a draft release to look over and publish by hand.
+#
+# Release: set the version in Cargo.toml ([workspace.package]), commit, then tag and push:
+#   git tag v0.1.0 && git push origin v0.1.0
+# The tag has to match the version in Cargo.toml, or nothing is built.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Tests and version
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Tag matches Cargo.toml
+        if: github.ref_type == 'tag'
+        run: |
+          version=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME, but Cargo.toml says $version"
+            exit 1
+          fi
+      - run: rustup toolchain install stable --profile minimal && rustup default stable
+      - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libgl1-mesa-dev
+      - run: cargo test --workspace --locked
+
+  build:
+    name: ${{ matrix.name }}
+    needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Windows is cross-built with mingw, as for the test station (the icon needs windres).
+          - name: windows-x86_64
+            os: ubuntu-22.04
+            target: x86_64-pc-windows-gnu
+            exe: rfdyno.exe
+          # 22.04 for an older glibc, so the binary runs on more distributions.
+          - name: linux-x86_64
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            exe: rfdyno
+          - name: macos-aarch64
+            os: macos-latest
+            target: aarch64-apple-darwin
+            exe: rfdyno
+          # No Intel macOS build: GitHub's runners for it are scarce and stall the release.
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Rust
+        run: |
+          rustup toolchain install stable --profile minimal --target ${{ matrix.target }}
+          rustup default stable
+      - name: mingw
+        if: matrix.target == 'x86_64-pc-windows-gnu'
+        run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64 binutils-mingw-w64-x86-64
+      - name: Linux libraries
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libgl1-mesa-dev
+      - name: Build
+        env:
+          CFLAGS_x86_64_pc_windows_gnu: -D_WIN32_WINNT=0x0601
+        run: cargo build --release --locked -p rfdyno --target ${{ matrix.target }}
+      - name: Package
+        shell: bash
+        run: |
+          name="rfdyno-${GITHUB_REF_NAME}-${{ matrix.name }}"
+          mkdir "$name"
+          cp "target/${{ matrix.target }}/release/${{ matrix.exe }}" README.md LICENSE-MIT LICENSE-APACHE "$name/"
+          cp apps/rfdyno/assets/fonts/OFL-Barlow.txt "$name/"
+          if [ "${{ matrix.name }}" = windows-x86_64 ]; then
+            zip -r "$name.zip" "$name"
+          else
+            tar czf "$name.tar.gz" "$name"
+          fi
+      - uses: actions/upload-artifact@v5
+        with:
+          name: ${{ matrix.name }}
+          # The archives only: rfdyno-*.* would also match the folders (the version has dots).
+          path: |
+            rfdyno-*.zip
+            rfdyno-*.tar.gz
+          if-no-files-found: error
+
+  release:
+    name: Draft release
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v5
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          (cd dist && sha256sum rfdyno-* > SHA256SUMS)
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --draft --title "RFdyno $GITHUB_REF_NAME" --generate-notes

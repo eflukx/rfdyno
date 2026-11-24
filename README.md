@@ -51,6 +51,12 @@ CFLAGS_x86_64_pc_windows_gnu=-D_WIN32_WINNT=0x0601 cargo build --release --targe
 python3 tools/icon.py                          # redraw the icon (needs Pillow)
 ```
 
+Builds for Windows, Linux and macOS (Apple silicon) are on the
+[releases page](https://github.com/eflukx/rfdyno/releases). A release is made by pushing a
+tag that matches the version in `Cargo.toml` (`git tag v0.1.0 && git push origin v0.1.0`):
+`.github/workflows/release.yml` builds all three and puts them in a draft release. The macOS
+builds aren't signed: open them the first time with right-click → Open.
+
 ## Example: an nRF9160 trying to attach to LTE-M
 
 ![RFdyno showing an nRF9160's transmit bursts](docs/nrf9160-attach.png)
